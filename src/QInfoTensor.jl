@@ -15,6 +15,7 @@ include("sitetypes/tags.jl")
 include("sitetypes/space.jl")
 include("sitetypes/qubit.jl")
 
+include("utils.jl")
 include("tensors.jl")
 include("tensortrain.jl")
 include("mps.jl")
