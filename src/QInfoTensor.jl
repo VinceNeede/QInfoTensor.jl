@@ -32,4 +32,5 @@ export tensors, llim, rlim, isortho, orthocenter, set_ortho_lims!
 export orthogonalize, orthogonalize!, orthogonalize!!, compress, compress!, compress!!
 export inner, norm, normalize, normalize!, normalize!!
 export OpTerm, OpSum, add!
+export expect, expect!, apply, apply!
 end # module QInfoTensor

@@ -130,8 +130,8 @@ end
 
     @testset "Operator Resolution Layer" begin
         # Test that _get_operator successfully resolves types identically
-        op_str = _get_operator(sites[1], "Sz")
-        op_name = _get_operator(sites[1], OpName("Sz"))
+        op_str = QInfoTensor._get_operator(sites[1], "Sz")
+        op_name = QInfoTensor._get_operator(sites[1], OpName("Sz"))
         
         @test op_str isa AbstractTensorMap
         @test op_str == op_name
@@ -143,13 +143,13 @@ end
         @test expect(ψ, sites, "Sz", 2) ≈ expected_sz[2]
         
         # Test passing an explicit AbstractTensorMap directly
-        sz_tensor = _get_operator(sites[1], "Sz")
+        sz_tensor = QInfoTensor._get_operator(sites[1], "Sz")
         @test expect(ψ, sz_tensor, 3) ≈ expected_sz[3]
     end
 
     @testset "Mutating vs Non-Mutating" begin
         ψ_copy = copy(ψ)
-        sz_tensor = _get_operator(sites[1], "Sz")
+        sz_tensor = QInfoTensor._get_operator(sites[1], "Sz")
         
         # expect! is allowed to change the internal gauge/orthogonalization center
         val_mutating = expect!(ψ_copy, sz_tensor, 2)
@@ -178,5 +178,64 @@ end
         
         # Should work for specific positions with a single SiteType
         @test expect(ψ, single_site, "Sz", [1, 3]) ≈ [expected_sz[1], expected_sz[3]]
+    end
+end
+
+
+@testset "apply!/apply: zip-up MPO-MPS contraction" begin
+    L = 6
+    J = 1.0
+    h = 0.5
+    sites = sitetypes(:SpinHalf, L)
+ 
+    H_os = OpSum()
+    for i in 1:(L-1)
+        H_os += (-J, :Sz, i, :Sz, i + 1)
+    end
+    for i in 1:L
+        H_os += (-h, :Sx, i)
+    end
+    H = MPO(H_os, sites)
+    orthogonalize!(H, 1)   # required for zip-up accuracy; suppresses warning
+ 
+    @testset "apply: ⟨ψ|Hφ⟩ == ⟨ψ|H|φ⟩ for random states" begin
+        ψ = random_mps(sites, 4)
+        φ = random_mps(sites, 4)
+        Hφ = apply(H, φ; maxdim=16, cutoff=1e-10)
+        @test inner(ψ, Hφ) ≈ inner(ψ, H, φ) atol=1e-6
+    end
+ 
+    @testset "apply: TFIM energy on |↑↑...↑⟩ matches analytic value" begin
+        # ⟨↑...↑|H_TFIM|↑...↑⟩ = -J*(L-1)*0.25, ⟨Sx⟩=0 for Sz eigenstates
+        ψ_up = MPS(sites, fill(StateName(:Up), L))
+        Hψ = apply(H, ψ_up; maxdim=16, cutoff=1e-10)
+        @test inner(ψ_up, Hψ) ≈ -J * (L - 1) * 0.25 atol=1e-8
+    end
+ 
+    @testset "apply!: mutates ψ in place, apply: leaves original unchanged" begin
+        φ = random_mps(sites, 4)
+        φ_copy = copy(φ)
+        Hφ = apply(H, φ; maxdim=16, cutoff=1e-10)
+ 
+        # φ unchanged after non-mutating apply
+        @test inner(φ, φ_copy) ≈ sqrt(real(inner(φ, φ)) * real(inner(φ_copy, φ_copy))) atol=1e-10
+ 
+        # apply! result matches non-mutating version
+        apply!(H, φ_copy; maxdim=16, cutoff=1e-10)
+        ψ = random_mps(sites, 4)
+        @test inner(ψ, φ_copy) ≈ inner(ψ, Hφ) atol=1e-6
+    end
+ 
+    @testset "apply: result is orthogonalized after compress!" begin
+        φ = random_mps(sites, 4)
+        Hφ = apply(H, φ; maxdim=16, cutoff=1e-10)
+        @test isortho(Hφ)
+        @test orthocenter(Hφ) == 1
+    end
+ 
+    @testset "apply: warning issued when H is not left-canonicalized" begin
+        H_unortho = MPO(H_os, sites)
+        φ = random_mps(sites, 4)
+        @test_logs (:warn, r"not left-canonicalized") apply(H_unortho, φ; maxdim=16, cutoff=1e-10)
     end
 end
