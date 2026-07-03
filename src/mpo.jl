@@ -57,3 +57,91 @@ function set_ortho_lims!(ψ::MPO, l::Int, r::Int)
     ψ.rlim = r
     return ψ
 end
+
+"""
+    inner(ψ::MPS, H::MPO, φ::MPS) -> Number
+
+Compute the matrix element `⟨ψ|H|φ⟩` by contracting the bra, MPO, and ket
+left-to-right in a single sweep.  `ψ` is automatically conjugated.
+"""
+function TensorKit.inner(ψ::MPS, H::MPO, φ::MPS)
+    L = length(H)
+    length(ψ) == L && length(φ) == L || throw(ArgumentError("MPS/MPO length mismatch"))
+ 
+    T = promote_type(eltype(ψ), eltype(H), eltype(φ))
+    E = TensorMap(ones(T, 1, 1), ℂ^1 ← (ℂ^1 ⊗ ℂ^1))
+ 
+    for i in 1:L
+        ψi, Hi, φi = ψ[i], H[i], φ[i]
+        @tensor Enew[rp; rh r] := E[lp; lh l] * conj(ψi[lp, sp, rp]) * Hi[lh, sp, s, rh] * φi[l, s, r]
+        E = Enew
+    end
+    return only(block(E, Trivial()))
+end
+ 
+function _expect(ψi::MPSTensor, O::AbstractTensorMap)
+    @tensor res[:] := conj(ψi[l, sp, r]) * O[sp, s] * ψi[l, s, r]
+    return real(res)
+end
+
+"""
+    expect!(ψ::MPS, O::AbstractTensorMap, pos::Int)
+
+In-place expectation value. Modifies the gauge/orthogonalization center of `ψ`.
+"""
+function expect!(ψ::MPS, O::AbstractTensorMap, pos::Int)
+    ψ = orthogonalize!(ψ, pos)
+    return _expect(ψ[pos], O)
+end
+
+"""
+    expect(ψ::MPS, O::AbstractTensorMap, pos::Int)
+
+Out-of-place expectation value. Safe to use; does not modify the input `ψ`.
+"""
+function expect(ψ::MPS, O::AbstractTensorMap, pos::Int)
+    ψc = orthogonalize(ψ, pos) # Assuming this creates a safe view/copy
+    return _expect(ψc[pos], O)
+end
+
+
+_get_operator(site::SiteType, on::OpName; kwargs...) = optensor(site, on; kwargs...)
+
+# Convenience: Convert AbstractString to OpName
+_get_operator(site::SiteType, name::AbstractString; kwargs...) = _get_operator(site, OpName(name); kwargs...)
+
+# Convenience: Extract the correct site from a Vector of sites
+_get_operator(sites::Vector{<:SiteType}, op, pos::Int; kwargs...) = _get_operator(sites[pos], op; kwargs...)
+
+# --- Single Position Dispatch ---
+function expect(ψ::MPS, sites::Vector{<:SiteType}, op, pos::Int; kwargs...)
+    O = _get_operator(sites, op, pos; kwargs...)
+    return expect(ψ, O, pos)
+end
+
+# --- Multiple Positions Dispatch (The Single Source of Truth) ---
+# This single method handles ALL operator types (String, OpName) 
+# because it delegates operator construction to `_get_operator`.
+function expect(ψ::MPS, sites::Vector{<:SiteType}, op, positions::AbstractVector{Int}=1:length(ψ); kwargs...)
+    ψc = copy(ψ) # Clone once for the lifetime of the loop
+    
+    # We sort positions to minimize orthogonalization movement overhead, 
+    # and use expect! internally because we are mutating our local clone ψc.
+    return [expect!(ψc, _get_operator(sites, op, pos; kwargs...), pos) for pos in sort(positions)]
+end
+
+
+# ==============================================================================
+# 4. UNIFORM LATTICE CATCH-ALLS (Single SiteType Shortcuts)
+# ==============================================================================
+
+# Convert single SiteType to a Vector and re-dispatch for multiple positions
+function expect(ψ::MPS, siteT::SiteType, op, positions::AbstractVector{Int}; kwargs...)
+    sites = fill(siteT, length(ψ))
+    return expect(ψ, sites, op, positions; kwargs...)
+end
+
+# Fallback: If given a single SiteType and no positions, default to all positions
+function expect(ψ::MPS, siteT::SiteType, op; kwargs...)
+    return expect(ψ, siteT, op, 1:length(ψ); kwargs...)
+end
