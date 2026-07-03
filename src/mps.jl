@@ -102,6 +102,14 @@ function MPS(sites::Vector{<:SiteType{<:Any,Trivial}}, states::Vector{<:StateNam
     return MPS(Float64, sites, states)
 end
 
+function MPS(::Type{T}, sites::Vector{<:SiteType{<:Any,Trivial}}, states::Vector{<:Union{AbstractString,Symbol}}) where {T<:Number}
+    return MPS(T, sites, StateName.(states))
+end
+
+function MPS(sites::Vector{<:SiteType{<:Any,Trivial}}, states::Vector{<:Union{AbstractString,Symbol}})
+    return MPS(Float64, sites, StateName.(states))
+end
+
 """
 Directly set `llim`/`rlim`. Low-level bookkeeping — callers (e.g. an
 orthogonalization sweep) are responsible for `l`/`r` actually reflecting
