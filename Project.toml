@@ -1,0 +1,12 @@
+name = "QInfoTensor"
+uuid = "d8a2a8fe-8875-444b-8ce1-7ed5d24a28fb"
+version = "0.1.0"
+authors = ["VinceNeede <v.bisogno3@studenti.unipi.it>"]
+
+[deps]
+TensorKit = "07d1fe3e-3e46-537d-9eac-e9e13d0d4cec"
+TensorOperations = "6aa20fa7-93e2-5fca-9bc0-fbd0db3c71a2"
+
+[compat]
+TensorKit = "0.17.0"
+TensorOperations = "5.6.2"
