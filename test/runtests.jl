@@ -6,4 +6,5 @@ using QInfoTensor
     include("test_sitetype.jl")
     include("test_mps.jl")
     include("test_opsum.jl")
+    include("test_mpo.jl")
 end
