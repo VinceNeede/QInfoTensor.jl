@@ -1,3 +1,16 @@
+# ------------------------------------------------------------------------
+# SiteType / OpName / StateName
+#
+# Ported from the prototype (dense) library's tags.jl almost verbatim.
+# OpName and StateName are unchanged — symmetry is a SiteType-only concern.
+# SiteType gains a second type parameter, Sym<:TensorKit.Sector, defaulting
+# to Trivial so existing single-argument call sites keep working exactly
+# as before, with symmetry an explicit opt-in via a `sym` keyword (not a
+# positional argument, since that would collide with the existing
+# `params...` mechanism used for parametric tags like `SiteType(:Boson, 4)`
+# — see chat discussion).
+# ------------------------------------------------------------------------
+
 # ── SiteType ─────────────────────────────────────────────────────────────────
 
 """
@@ -32,6 +45,21 @@ Base.show(io::IO, ::SiteType{tag,Sym}) where {tag<:Symbol,Sym} =
     print(io, "SiteType(:$tag", Sym === Trivial ? "" : "; sym=$Sym", ")")
 Base.show(io::IO, ::SiteType{tag,Sym}) where {tag<:Tuple,Sym} =
     print(io, "SiteType$tag", Sym === Trivial ? "" : "; sym=$Sym")
+
+"""
+    sitetypes(tag, L::Int, params...; sym::Type{<:Sector}=Trivial) -> Vector{<:SiteType}
+
+Convenience constructor for a uniform chain of `L` sites of the same
+type, mirroring ITensors.jl's `siteinds("S=1/2", L)`. Equivalent to
+`fill(SiteType(tag, params...; sym=sym), L)`.
+
+    sitetypes(:SpinHalf, 10)
+    sitetypes(:SpinHalf, 10; sym=U1Irrep)
+    sitetypes(:Boson, 10, 4)              # tag with a structural parameter (dim=4)
+"""
+function sitetypes(tag::Union{Symbol,AbstractString}, L::Int, params...; sym::Type{<:Sector}=Trivial)
+    return fill(SiteType(tag, params...; sym=sym), L)
+end
 
 # ── OpName ───────────────────────────────────────────────────────────────────
 
