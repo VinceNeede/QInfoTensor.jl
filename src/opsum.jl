@@ -214,7 +214,14 @@ end
 
 function _opsum_cache_and_eltype(opsum::OpSum, sites::Vector{<:SiteType{<:Any,Trivial}})
     cache = Dict{Tuple{Int,OpName,NamedTuple},Matrix}()
-    C = Float64
+    # Bool, not Float64: Bool is the true identity element for numeric
+    # promotion (promote_type(Bool,T)==T for any numeric T), so it never
+    # forces unwanted precision the way starting at Float64 would (e.g.
+    # an all-Float32 OpSum would otherwise get silently promoted to
+    # Float64 just because of the seed, not because anything in it needs
+    # double precision). Falls back to Float64 below if opsum turns out
+    # to have no terms at all (C would otherwise stay Bool, nonsensical).
+    C = Bool
     for term in opsum.terms
         C = promote_type(C, typeof(term.coeff))
         for (site_j, opdata) in term.ops
@@ -226,6 +233,7 @@ function _opsum_cache_and_eltype(opsum::OpSum, sites::Vector{<:SiteType{<:Any,Tr
             C = promote_type(C, eltype(mat))
         end
     end
+    C = C === Bool ? Float64 : C  # empty OpSum: no terms ever seen, fall back to a sensible default
     return cache, C
 end
 
