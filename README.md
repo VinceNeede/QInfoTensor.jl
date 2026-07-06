@@ -2,7 +2,8 @@
 
 *A finite, symmetry-aware matrix product state / matrix product operator library for quantum information, built on [TensorKit.jl](https://github.com/QuantumKitHub/TensorKit.jl).*
 
-**Status:** core functionality implemented and tested — `SiteType`/`op`/`state`
+**Status:** core functionality implemented, tested, and benchmarked
+(including a speed/memory comparison against ITensor) — `SiteType`/`op`/`state`
 dispatch, `MPS`/`MPO` containers, orthogonalization, compression,
 `OpSum`→`MPO` construction, `inner`/`norm`/`normalize`, and zip-up
 `apply!` (`H|ψ⟩`). **Currently restricted to `Trivial` (unsymmetrized)
@@ -47,6 +48,24 @@ support and the next major piece of design work.
 - **Hamiltonian construction**: `OpSum`/`add!`, FSM-based `MPO(::OpSum, sites)`.
 - **Expectation values & overlaps**: `inner(ψ,φ)`, `inner(ψ,H,φ)`, `norm`/`normalize`/`normalize!`/`normalize!!` (MPS, requires an orthogonality center).
 - **Operator application**: `apply!`/`apply` (zip-up algorithm for `H|ψ⟩`, following Paeckel et al. 2019 for default truncation parameters).
+- **Benchmarking**: a `PkgBenchmark`-based suite and a speed/memory comparison against ITensor (see below).
+
+## Benchmarking
+
+A `PkgBenchmark` suite in `benchmark/` covers `apply!` over a brickwork
+circuit trajectory and over single Hamiltonian application. Run via
+`julia benchmark/run_and_export.jl`; results are written as timestamped
+markdown to `benchmark/results/`.
+
+`benchmark/compare_itensor.jl` compares against ITensor on the same
+circuit benchmark (`Trivial` sites, single-threaded, controlled BLAS/
+`Strided.jl` thread counts on both sides). Current result, reproduced
+twice: QInfoTensor is consistently faster (~1.3×–2.6×, largest at small
+bond dimension, shrinking as `maxdim` grows) and consistently lower
+memory (~2.2×–2.6×, flat across the whole tested range). This is a
+`Trivial`-sites comparison — see `design_notes.md` for caveats and for
+where a symmetric-tensor comparison could show a more fundamental
+advantage once that support lands.
 
 ## Planned algorithms
 

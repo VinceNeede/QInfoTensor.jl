@@ -68,16 +68,15 @@ convention structurally, since a direct construction can't introduce
 this kind of asymmetry.
 """
 function _gate_to_mpo_tensors(gate::AbstractMatrix, V::ElementarySpace)
-    d = dim(V)
     Gate0 = TensorMap(gate, (V ⊗ V) ← (V ⊗ V))  # legs (o2,o1;i2,i1) per TensorKit's own flattening
-    Gate_regrouped = permute(Gate0, ((2, 4), (1, 3)))  # (o1,i1) | (o2,i2)
+    Gate_regrouped = TensorKit.permute(Gate0, ((2, 4), (1, 3)))  # (o1,i1) | (o2,i2)
     V_factor, C_factor = left_orth(Gate_regrouped)
 
     L_dense = insertleftunit(V_factor, Val(1))
     R_dense = insertrightunit(C_factor, Val(3))
 
-    left_tensor = permute(L_dense, ((1, 2), (3, 4)))
-    right_tensor = permute(R_dense, ((1, 2), (3, 4)))
+    left_tensor = TensorKit.permute(L_dense, ((1, 2), (3, 4)))
+    right_tensor = TensorKit.permute(R_dense, ((1, 2), (3, 4)))
     return left_tensor, right_tensor
 end
 
@@ -91,9 +90,9 @@ right shape for a rank-(2,2) tensor's dense constructor, `(d,d)`, once
 both boundary legs are `ℂ^1` — no reshape needed at all), for the same
 uniform-plain-legs reason as `_gate_to_mpo_tensors`.
 """
-function _identity_mpo_tensor(st::SiteType)
+function _identity_mpo_tensor(st::QInfoTensor.SiteType)
     V = TensorKit.space(st)
-    Id = op(st, OpName(:Id))  # dense (d,d) matrix, already the right shape
+    Id = QInfoTensor.op(st, QInfoTensor.OpName(:Id))  # dense (d,d) matrix, already the right shape
     return TensorMap(Id, (ℂ^1 ⊗ V) ← (V ⊗ ℂ^1))
 end
 
@@ -110,7 +109,7 @@ reused across every bond/site in the layer — valid since `gate` and the
 physical space are identical throughout (assumes uniform physical space
 across `sites`), not an approximation.
 """
-function build_gate_layer_mpo(sites::Vector{<:SiteType{<:Any,Trivial}}, gate::AbstractMatrix; start::Int=1)
+function build_gate_layer_mpo(sites::Vector{<:QInfoTensor.SiteType{<:Any,Trivial}}, gate::AbstractMatrix; start::Int=1)
     L = length(sites)
     iseven(L) || throw(ArgumentError("build_gate_layer_mpo requires even L"))
     start in (1, 2) || throw(ArgumentError("start must be 1 or 2"))
@@ -138,7 +137,7 @@ function build_gate_layer_mpo(sites::Vector{<:SiteType{<:Any,Trivial}}, gate::Ab
         end
     end
 
-    return MPO(tensors)
+    return QInfoTensor.MPO(tensors)
 end
 
 # ------------------------------------------------------------------------
@@ -174,7 +173,7 @@ const CIRCUIT_PROBLEMS = (circuit_L20, circuit_L50)
 Fully z-polarized product state (all "Up"), bond dimension 1 — the
 standard initial state for a quench.
 """
-build_quench_state(sites) = MPS(sites, fill("Up", length(sites)))
+build_quench_state(sites) = QInfoTensor.MPS(sites, fill("Up", length(sites)))
 
 """
     build_circuit_inputs(problem::CircuitProblem) -> (sites, ψ0, H_odd, H_even)
@@ -187,9 +186,9 @@ function build_circuit_inputs(problem::CircuitProblem)
     sites = sitetypes(:SpinHalf, problem.L)
     ψ0 = build_quench_state(sites)
     H_odd = build_gate_layer_mpo(sites, _CIRCUIT_GATE; start=1)
-    orthogonalize!(H_odd, 1)
+    QInfoTensor.orthogonalize!(H_odd, 1)
     H_even = build_gate_layer_mpo(sites, _CIRCUIT_GATE; start=2)
-    orthogonalize!(H_even, 1)
+    QInfoTensor.orthogonalize!(H_even, 1)
     return sites, ψ0, H_odd, H_even
 end
 
@@ -207,8 +206,8 @@ only specifies `maxdim`/`cutoff`. This is the part actually timed by
 function run_circuit_trajectory(ψ0, H_odd, H_even, n_steps; kwargs...)
     ψ = ψ0
     for _ in 1:n_steps
-        ψ = apply(H_odd, ψ; kwargs...)
-        ψ = apply(H_even, ψ; kwargs...)
+        ψ = QInfoTensor.apply(H_odd, ψ; kwargs...)
+        ψ = QInfoTensor.apply(H_even, ψ; kwargs...)
     end
     return ψ
 end

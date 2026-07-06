@@ -9,8 +9,9 @@ kept up to date the same way, alongside the code it documents.
 
 **Status update**: core types, `SiteType`/`op`/`state`, MPS/MPO
 containers, orthogonalization, compression, `OpSum`→MPO construction,
-`inner`/`norm`/`normalize`, and zip-up `apply!` are all implemented and
-tested (`Trivial` sites only — see "Current scope" below). This file has
+`inner`/`norm`/`normalize`, zip-up `apply!`, a benchmark suite, and a
+comparison against ITensor are all implemented and tested (`Trivial`
+sites only — see "Current scope" below). This file has
 been rewritten to reflect the actual, tested implementation rather than
 the original pre-implementation plan; see git history for the original
 version if the historical reasoning is needed.
@@ -443,6 +444,85 @@ the pre-contraction plain spaces would mismatch).
 over) rather than something `compress!` actually depends on being
 correct.
 
+## Benchmark suite (`benchmark/`)
+
+`PkgBenchmark`-based: `apply!` over a brickwork circuit trajectory
+(`circuit_L20`/`circuit_L50`, sweeping `maxdim`) and over a single
+Hamiltonian application to a non-trivial-bond random MPS
+(`hamapply_tfim_L20_open`/`_periodic`). Two different blocking
+correctness checks run before the suite builds — norm preservation for
+the circuit (orthogonal gates, so exact unitary evolution preserves norm
+exactly) and `inner`-consistency for the Hamiltonian case (`H` isn't
+unitary, so norm preservation doesn't apply there). Results export to
+timestamped markdown via `benchmark/run_and_export.jl`.
+
+Running the circuit's correctness check caught a real, previously-untested
+bug: `build_gate_layer_mpo`'s boundary-leg insertion (originally a pure
+outer-product `@tensor` construction, `e_l[bl]*Gate0[...]*e_r[br]`, no
+shared labels) produced *asymmetric* leg duality — `e_l`'s leg entered in
+a codomain position (no crossing, stays plain) but `e_r`'s leg (native
+codomain-only, since `Tensor(...)` is always rank-(N,0)) was placed into
+a domain position, itself a crossing that introduces a dual. Confirmed
+empirically on a freshly-built layer MPO, before `orthogonalize!` even
+ran. Fixed with `TensorKit.insertleftunit`/`insertrightunit` — the
+correct, purpose-built tool for inserting a genuinely new trivial leg
+without this asymmetry.
+
+This was also the first real exercise of MPO orthogonalization at all.
+`orthogonalize!(H,1)` from a fresh (`llim=0`) MPO only triggers the
+**right**-sweep, so this confirms `_rightstep!` (and the `a,b;c,d`
+semicolon syntax it uses — see open question 8) works, but `_leftstep!`
+for MPO has still never actually executed. `compress!`/`orthogonalize!!`/
+`compress!!` on `MPO` remain untested too.
+
+Benchmarks run and pass. Observed cost scaling (both `maxdim`-at-fixed-`L`
+and `L`-at-fixed-`maxdim`) matches standard Schmidt-rank-capped MPS
+behavior — diminishing marginal cost as `maxdim` approaches a bond's true
+cap, and superlinear-looking scaling with `L` at large `maxdim` (more
+bonds in a longer chain can actually use the requested dimension) — not
+naive linear/polynomial scaling.
+
+## Comparison against ITensor (`benchmark/compare_itensor.jl`)
+
+Standalone script, not part of the `PkgBenchmark` `SUITE` (ITensor doesn't
+change across QInfoTensor commits, so `judge`/`compare` isn't the right
+mechanism). Ported from an earlier prototype-vs-ITensor comparison; the
+DMRG section was dropped entirely (no DMRG here yet), keeping only the
+circuit/`apply` comparison. `verify_circuit_equivalence.jl` checks
+physical correctness first (dense-vector overlap, small `L`) — same fixed
+gate, same brickwork circuit, both libraries — before trusting any timing
+comparison.
+
+Namespacing: QInfoTensor and `ITensorMPS` both export colliding names
+(`SiteType`, `MPO`, `MPS`, `orthogonalize!`, `apply`, `random_mps`, ...).
+`import ITensors, ITensorMPS` (not `using`) in the comparison scripts
+avoids the ambiguity — ITensor-side code was already fully qualified
+(`ITensorMPS.X`) throughout, so nothing else needed to change.
+
+Threading needed three independent knobs pinned, not one: BLAS/MKL
+threads, `Strided.jl`'s own thread pool (used internally by both
+TensorKit/TensorOperations *and* ITensor's dense permutes, separate from
+BLAS, defaults to `Threads.nthreads()`), and ITensor's block-sparse
+threading (`enable_threaded_blocksparse`, off by default, not relevant to
+this `Trivial`-only comparison). Missing the `Strided` knob specifically
+would leave permute costs varying independently of the BLAS thread
+setting on both sides.
+
+**Results** (single-threaded, twice-reproduced, `circuit_L20`/`_L50`,
+`maxdim` 5–320): QInfoTensor consistently faster (~1.3×–2.6×, shrinking
+as `maxdim` grows — consistent with lower fixed per-call overhead that
+matters most for small tensors, converging as BLAS/LAPACK cost dominates
+at large `χ`) and consistently lower memory (~2.2×–2.6×, flat across the
+*entire* tested range — a more structural, size-independent difference,
+not just small-tensor overhead). One anomalous data point at
+`L20,maxdim=320` in an initial run did not reproduce on re-run — treated
+as noise.
+
+Caveat: this is `Trivial` sites only. The real, defensible case for
+eventually beating ITensor is non-abelian (`SU2Irrep`) symmetry
+exploitation, which ITensor doesn't support natively — that needs the
+charged-operator/symmetric-construction work above to land first.
+
 ## Open questions (updated)
 
 1. **`SU2Irrep` dispatch table** — untouched, original open question 1
@@ -469,9 +549,12 @@ correct.
    `set_ortho_lims!`-ing directly rather than relying on the shared
    generic bookkeeping meaning anything mid-sweep.
 8. **`a, b; c, d` (multiple-before-multiple-after) semicolon syntax in
-   MPO orthogonalization steps** — written, never actually exercised by a
-   test (no MPO orthogonalization test exists yet). Real, currently
-   untested risk given the comma/space subtlety discovered elsewhere.
+   MPO orthogonalization steps** — the syntax pattern itself is now
+   confirmed safe (exercised by `_rightstep!` via the benchmark suite's
+   correctness check), but `_leftstep!` for `MPO` specifically has still
+   never actually executed — `orthogonalize!(H,1)` from a fresh MPO only
+   triggers the right-sweep. `compress!`/`orthogonalize!!`/`compress!!`
+   on `MPO` are also untested.
 
 ## Roadmap (actual order, for reference)
 
@@ -482,13 +565,15 @@ correct.
    validate against).~~ Done.
 3. ~~Port `OpSum` → `MPO` FSM construction.~~ Done, `Trivial`-only.
 4. ~~`inner`/`norm`/`normalize`, zip-up `apply!`.~~ Done.
-5. **DMRG3S** — not started. No direct MPSKit equivalent to lean on, per
+5. ~~Benchmark suite + ITensor comparison.~~ Done — see "Benchmark suite"
+   / "Comparison against ITensor" above.
+6. **DMRG3S** — not started. No direct MPSKit equivalent to lean on, per
    the original notes; now also has a real `apply!`/`inner` foundation to
    build the local update on top of.
-6. **SRC** — not started, no design work done, start from Camaño,
+7. **SRC** — not started, no design work done, start from Camaño,
    Epperly & Tropp 2025 Algorithm 1 as originally planned.
-7. Open quantum systems extension — not started.
-8. Symmetric (`U1Irrep`/`SU2Irrep`) support across the board — blocked on
+8. Open quantum systems extension — not started.
+9. Symmetric (`U1Irrep`/`SU2Irrep`) support across the board — blocked on
    the charged-operator/charged-state problem in "Current scope" above.
 
 ## Repository / workflow conventions
