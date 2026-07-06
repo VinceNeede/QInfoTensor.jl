@@ -1,0 +1,8 @@
+[deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+LoggingExtras = "e6f89c97-d47a-5376-807f-9c37f3926c36"
+MKL = "33e6dc65-8f57-5167-99aa-e5a354878fb2"
+PkgBenchmark = "32113eaa-f34f-5b0d-bd6c-c81e245fc73d"
+QInfoTensor = "d8a2a8fe-8875-444b-8ce1-7ed5d24a28fb"
+TensorKit = "07d1fe3e-3e46-537d-9eac-e9e13d0d4cec"
+TensorOperations = "6aa20fa7-93e2-5fca-9bc0-fbd0db3c71a2"
