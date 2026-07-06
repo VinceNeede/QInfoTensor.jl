@@ -244,11 +244,115 @@ function apply!(H::MPO, ψ::MPS, ::Val{:zipup};
     return ψ
 end
 
-"""
-    apply!(H::MPO, ψ::MPS; alg=:zipup, kwargs...) -> MPS
+function _src_prepass(H::MPO, ψ::MPS, χ̄::Int, T::Type)
+    L = length(H)
+    C = Vector{TensorMap}(undef, L-1)
 
-Dispatch to the algorithm selected by `alg`. Currently supported: `:zipup`.
-See [`apply!(H, ψ, Val(:zipup))`](@ref) for keyword arguments.
+    V_chi = ℂ^χ̄
+    
+    Δ_arr = zeros(T, χ̄, χ̄, χ̄)
+    for d in 1:χ̄
+        Δ_arr[d, d, d] = one(T)
+    end
+    δ = TensorMap(Δ_arr, V_chi ← V_chi ⊗ V_chi)
+
+    # --- Site 1 Boundary ---
+    H_1 = removeunit(H[1], Val(1))
+    ψ_1 = removeunit(ψ[1], Val(1))
+    physd = codomain(H_1)[1]    
+    Ω_1 = TensorMap(randn(T, χ̄, dim(physd)), V_chi ← physd)
+    
+    @tensoropt (a, c) C[1][a; b c] := Ω_1[a, d] * H_1[d, e, b] * ψ_1[e, c]
+
+    for i in 2:L-1
+        H_i, ψ_i = H[i], ψ[i]
+        physd = codomain(H_i)[2] # Top physical leg
+        Ω_i = TensorMap(randn(T, χ̄, dim(physd)), V_chi ← physd)
+        
+        @tensoropt (a, a1, a2, e, c) C[i][a; b c] := δ[a, a1, a2] * C[i-1][a1, d, e] * Ω_i[a2, f] * H_i[d, f, g, b] * ψ_i[e, g, c]
+    end
+    
+    return C
+end
+
+"""
+    apply!(H::MPO, ψ::MPS, ::Val{:src}; maxdim::Int = maxlinkdim(H) * maxlinkdim(ψ)) -> MPS
+
+Compute the compressed MPO-MPS product ``H|ψ⟩`` using the Successive Randomized Compression (SRC)
+algorithm.
+
+The algorithm computes a compressed MPS representation ``|η⟩ \\approx H|ψ⟩`` targeting a maximum 
+bond dimension `maxdim`. It operates via a single-pass framework consisting of a left-to-right 
+randomized sketching prepass followed by a right-to-left compression pass using randomized 
+matrix factorizations. 
+
+The input state `ψ` is modified **in-place** to store the compressed result and is returned 
+in right-canonical form.
+
+# Arguments
+- `H::MPO`: The Matrix Product Operator to apply.
+- `ψ::MPS`: The Matrix Product State to be multiplied. Overwritten in-place.
+- `maxdim::Int`: The maximum target bond dimension (sketch dimension ``\\bar{\\chi}``). Defaults to 
+  the exact, untruncated product of the MPO and MPS bond dimensions, which guarantees exact recovery 
+  with probability one (Theorem 3).
+
+# Errors
+- Throws an `ArgumentError` if `ψ` or `H` contains non-trivial symmetry sectors, as the randomized 
+  sketching step does not natively preserve block-sparse quantum numbers.
+
+# References
+- Camaño, C., Epperly, E. N., & Tropp, J. A. (2026). *Successive randomized compression: A 
+  randomized algorithm for the compressed MPO-MPS product*. arXiv:2504.06475.
+"""
+function apply!(H::MPO, ψ::MPS, ::Val{:src}; maxdim::Int=maxlinkdim(H)*maxlinkdim(ψ))
+    if sectortype(ψ[1]) != Trivial || sectortype(H[1]) != Trivial
+        throw(ArgumentError("The Successive Randomized Compression (SRC) algorithm does not support physical symmetries. " *
+                            "Both the MPO and MPS must be defined over plain `ComplexSpace` (sectortype must be `Trivial`)."))
+    end
+
+    T = promote_type(eltype(H), eltype(ψ))
+    C = _src_prepass(H, ψ, maxdim, T)
+    L = length(H)
+
+    H_L = removeunit(H[L], Val(4))
+    ψ_L = removeunit(ψ[L], Val(3))
+    @tensoropt Y_L[a; c] := C[L-1][a, b, d] * H_L[b, c, e] * ψ_L[d, e]
+    _, η_L = right_orth(Y_L)
+    @tensoropt S_L[a, b; c] := conj(η_L[a, d]) * H_L[b, d, e] * ψ_L[c, e] # S: (new_bond_left, bond left H, bond left ψ)
+    ψ.tensors[L] = insertleftunit(repartition(η_L, 2, 0), 3)
+
+    S_ip = S_L
+    for i in reverse(2:L-1)
+        H_i, ψ_i = H[i], ψ[i]
+        @tensoropt Y_i[a; b c] := C[i-1][a, d, e] * H_i[d, b, g, f] * ψ_i[e, g, h] * S_ip[c, f, h]
+        _, η_i = right_orth(Y_i)
+        @tensoropt S_i[c, b; a] := conj(η_i[c, d, e]) * H_i[b, d, g, f] * ψ_i[a, g, h] * S_ip[e, f, h]
+        ψ.tensors[i] = permute(η_i, ((1, 2), (3, )))
+        S_ip = S_i
+    end
+
+    H_1 = removeunit(H[1], Val(1))
+    ψ_1 = removeunit(ψ[1], Val(1))
+    @tensoropt η_1[a, b] := H_1[a, c, d] * ψ_1[c, e] * S_ip[b, d, e]
+    ψ.tensors[1] = repartition(insertleftunit(η_1, 1), 2, 1)
+    set_ortho_lims!(ψ, 0, 2) # State is right-canonicalized by construction
+    return ψ
+end
+
+
+"""
+    apply!(H::MPO, ψ::MPS; alg = :zipup, kwargs...) -> MPS
+
+Dispatch to the MPO-MPS multiplication algorithm selected by `alg`.
+
+# Supported Algorithms
+- `:zipup`: Standard zip-up method using sequential deterministic truncations. 
+  See [`apply!(H, ψ, Val(:zipup))`](@ref) for specific keyword arguments.
+- `:src`: Successive Randomized Compression (SRC) using single-pass randomized sketching. 
+  See [`apply!(H, ψ, Val(:src))`](@ref) for specific keyword arguments.
+
+# Returns
+- The compressed result matrix product state, modified in place.
 """
 apply!(H::MPO, ψ::MPS; alg=:zipup, kwargs...) = apply!(H, ψ, Val(alg); kwargs...)
 
