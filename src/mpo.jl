@@ -341,7 +341,90 @@ function apply!(H::MPO, ψ::MPS, ::Val{:src}; maxdim::Int=maxlinkdim(H)*maxlinkd
     return ψ
 end
 
+"""
+    apply!(H::MPO, ψ::MPS, ::Val{:densitymatrix}; maxdim=nothing, cutoff=nothing) -> MPS
 
+Compute the compressed MPO-MPS product ``H|ψ⟩`` using the density matrix
+algorithm.
+
+The algorithm computes a compressed MPS representation ``|η⟩ \\approx H|ψ⟩`` via a single
+right-to-left sweep, truncating at each site by eigendecomposing a running (Hermitian) reduced
+density matrix built from the environment to the left and right of that bond.
+
+The input state `ψ` is modified **in-place** to store the compressed result and is returned
+in right-canonical form.
+
+# Arguments
+- `H::MPO`: The Matrix Product Operator to apply.
+- `ψ::MPS`: The Matrix Product State to be multiplied. Overwritten in-place.
+- `maxdim`: The maximum target bond dimension at each truncated bond.
+- `cutoff`: The relative truncation tolerance at each truncated bond.
+
+# References
+- https://tensornetwork.org/mps/algorithms/denmat_mpo_mps/
+"""
+function _densitymatrix_envs(H::MPO, ψ::MPS)
+    L = length(H)
+    E = Vector{TensorMap}(undef, L - 1)
+
+    H_1 = removeunit(H[1], Val(1))
+    ψ_1 = removeunit(ψ[1], Val(1))
+
+    @tensoropt E[1][rh', r'; rh, r] :=
+        H_1[s; s1 rh] * ψ_1[s1; r] * conj(H_1[s; s2 rh']) * conj(ψ_1[s2; r'])
+
+    for i in 2:(L - 1)
+        H_i, ψ_i = H[i], ψ[i]
+        E_im = E[i - 1]
+        @tensoropt E[i][rh', r'; rh, r] :=
+            E_im[lh', l'; lh, l] * H_i[lh, s; s1, rh] * ψ_i[l, s1; r] *
+            conj(H_i[lh', s; s2, rh']) * conj(ψ_i[l', s2; r'])
+    end
+    return E
+end
+
+function apply!(H::MPO, ψ::MPS, ::Val{:densitymatrix}; maxdim=nothing, cutoff=nothing)
+    L = length(H)
+    @assert length(ψ) == L "MPO/MPS length mismatch"
+
+    strategy = _truncation_strategy(maxdim, cutoff)
+
+    E = _densitymatrix_envs(H, ψ)
+
+    # --- last site (L): no carried-over bond yet, single physical leg ---
+    H_L = removeunit(H[L], Val(4))
+    ψ_L = removeunit(ψ[L], Val(3))
+    @tensoropt R[lh, s', l] := H_L[lh, s'; s] * ψ_L[l; s]
+    @tensoropt ρ[s'; s] := E[L-1][lh', l'; lh, l] * R[lh, s', l] * conj(R[lh', s, l'])
+
+    _, V, _ = eigh_trunc(ρ; trunc=strategy)
+    Vbdry = TensorKit.permute(insertrightunit(V, Val(2)), ((2, 1), (3,)))
+    ψ.tensors[L] = TensorKit.flip(Vbdry, 1)   # only ONE crossed leg here (newbond); phys/trivial never cross
+
+    H_im, ψ_im = H[L-1], ψ[L-1]
+    @tensoropt R[lh, s', l, b] := H_im[lh, s'; s, rh] * ψ_im[l, s; r] * conj(V[s1; b]) * R[rh, s1, r]
+
+    # --- middle sites: combined (phys, carried-over bond) at every step ---
+    for i in reverse(2:L-1)
+        H_im, ψ_im = H[i-1], ψ[i-1]
+        E_im = E[i - 1]
+
+        @tensoropt ρ[s, b; s2, b2] := E_im[lh', l'; lh, l] * R[lh, s, l, b] * conj(R[lh', s2, l', b2])
+        _, V, _ = eigh_trunc(ρ; trunc=strategy)
+
+        Vmid = TensorKit.permute(V, ((3, 1), (2,)))
+        ψ.tensors[i] = TensorKit.flip(TensorKit.flip(Vmid, 1), 3)   # BOTH crossed legs need fixing here
+
+        @tensoropt R[lh2, s', l2, bnew] :=
+            H_im[lh2, s'; s3, rh] * ψ_im[l2, s3; r] * conj(V[s4, b3; bnew]) * R[rh, s4, r, b3]
+    end
+
+    ψ.tensors[1] = flip(permute(removeunit(R, Val(1)), ((2, 1), (3,))), 3)
+
+    set_ortho_lims!(ψ, 0, 2)   # right-canonical by construction
+    return ψ
+end
+ 
 """
     apply!(H::MPO, ψ::MPS; alg = :zipup, kwargs...) -> MPS
 
@@ -352,6 +435,8 @@ Dispatch to the MPO-MPS multiplication algorithm selected by `alg`.
   See [`apply!(H, ψ, Val(:zipup))`](@ref) for specific keyword arguments.
 - `:src`: Successive Randomized Compression (SRC) using single-pass randomized sketching. 
   See [`apply!(H, ψ, Val(:src))`](@ref) for specific keyword arguments.
+- `:densitymatrix`: Density matrix algorithm using eigendecomposition-based truncation. 
+  See [`apply!(H, ψ, Val(:densitymatrix))`](@ref) for specific keyword arguments.
 
 # Returns
 - The compressed result matrix product state, modified in place.

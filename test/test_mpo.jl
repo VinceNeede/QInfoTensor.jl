@@ -306,3 +306,54 @@ end
         # @test_throws ArgumentError apply!(H_sym, ψ_sym, Val(:src))
     end
 end
+
+@testset "apply!/apply: DensityMatrix MPO-MPS contraction" begin
+    L = 6
+    J = 1.0
+    h = 0.5
+    sites = sitetypes(:SpinHalf, L)
+ 
+    H_os = OpSum()
+    for i in 1:(L-1)
+        H_os += (-J, :Sz, i, :Sz, i + 1)
+    end
+    for i in 1:L
+        H_os += (-h, :Sx, i)
+    end
+    H = MPO(H_os, sites)
+ 
+    @testset "apply: ⟨ψ|Hφ⟩ == ⟨ψ|H|φ⟩ for random states" begin
+        ψ = random_mps(sites, 4)
+        φ = random_mps(sites, 4)
+        Hφ = apply(H, φ; alg=:densitymatrix, maxdim=16, cutoff=1e-10)
+        @test inner(ψ, Hφ) ≈ inner(ψ, H, φ) atol=1e-6
+    end
+ 
+    @testset "apply: TFIM energy on |↑↑...↑⟩ matches analytic value" begin
+        # ⟨↑...↑|H_TFIM|↑...↑⟩ = -J*(L-1)*0.25, ⟨Sx⟩=0 for Sz eigenstates
+        ψ_up = MPS(sites, fill(StateName(:Up), L))
+        Hψ = apply(H, ψ_up; alg=:densitymatrix, maxdim=16, cutoff=1e-10)
+        @test inner(ψ_up, Hψ) ≈ -J * (L - 1) * 0.25 atol=1e-8
+    end
+ 
+    @testset "apply!: mutates ψ in place, apply: leaves original unchanged" begin
+        φ = random_mps(sites, 4)
+        φ_copy = copy(φ)
+        Hφ = apply(H, φ; alg=:densitymatrix, maxdim=16, cutoff=1e-10)
+ 
+        # φ unchanged after non-mutating apply
+        @test inner(φ, φ_copy) ≈ sqrt(real(inner(φ, φ)) * real(inner(φ_copy, φ_copy))) atol=1e-10
+ 
+        # apply! result matches non-mutating version
+        apply!(H, φ_copy; alg=:densitymatrix, maxdim=16, cutoff=1e-10)
+        ψ = random_mps(sites, 4)
+        @test inner(ψ, φ_copy) ≈ inner(ψ, Hφ) atol=1e-6
+    end
+ 
+    @testset "apply: result is orthogonalized after compress!" begin
+        φ = random_mps(sites, 4)
+        Hφ = apply(H, φ; alg=:densitymatrix, maxdim=16, cutoff=1e-10)
+        @test isortho(Hφ)
+        @test orthocenter(Hφ) == 1
+    end
+ end
