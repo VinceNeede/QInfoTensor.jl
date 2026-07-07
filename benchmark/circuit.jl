@@ -167,6 +167,24 @@ const circuit_L50 = CircuitProblem("circuit_L50", 50, 6, _CIRCUIT_MAXDIM_VALUES,
 
 const CIRCUIT_PROBLEMS = (circuit_L20, circuit_L50)
 
+# ------------------------------------------------------------------------
+# Small "smoke-test" circuit problem, used ONLY by the correctness checks
+# in benchmarks.jl — deliberately NOT part of CIRCUIT_PROBLEMS/SUITE.
+#
+# The checks exist to catch construction bugs (wrong leg convention, wrong
+# gate placement in build_gate_layer_mpo, etc.) that would show up
+# identically at any size — a bug that breaks norm(ψ)≈1 at L=8, n_steps=2
+# breaks it just as surely at L=50, n_steps=6. Running the check at the
+# real benchmark sizes only pays for exact (no-truncation) evolution at
+# bond dimension 4^n_steps=4096 with nothing gained in bug-catching power
+# over bond dimension 4^2=16. Keep this decoupled from the timed problems
+# so bumping n_steps/L for the benchmark sweep never silently makes the
+# correctness check itself the bottleneck again.
+# ------------------------------------------------------------------------
+
+const circuit_check = CircuitProblem("circuit_check", 8, 2, [4^2], _CIRCUIT_CUTOFF)
+const CIRCUIT_CHECK_PROBLEMS = (circuit_check,)
+
 """
     build_quench_state(sites) -> MPS
 

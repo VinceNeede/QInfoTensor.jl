@@ -73,6 +73,44 @@ const hamapply_tfim_L20_periodic = HamiltonianApplyProblem(
 
 const HAMAPPLY_PROBLEMS = (hamapply_tfim_L20_open, hamapply_tfim_L20_periodic)
 
+# ------------------------------------------------------------------------
+# Small "smoke-test" Hamiltonian problems, used ONLY by the correctness
+# checks in benchmarks.jl — deliberately NOT part of HAMAPPLY_PROBLEMS/
+# SUITE. Same reasoning as circuit_check in circuit.jl: a bug in
+# _tfim_opsum/MPO construction (open vs. periodic wraparound term, sign
+# convention, etc.) shows up identically at L=6 as at L=20, so there's
+# nothing gained in bug-catching power from checking at the full L=20,
+# maxdim=1000 benchmark scale — only cost.
+# ------------------------------------------------------------------------
+
+const _HAMAPPLY_CHECK_L = 6
+const _HAMAPPLY_CHECK_INITIAL_MAXDIM = 4
+const _HAMAPPLY_CHECK_MAXDIM_VALUES = [8]
+
+const tfim_check_open = HamiltonianSpec(
+    "tfim_check_open", _HAMAPPLY_CHECK_L, false,
+    () -> sitetypes(:SpinHalf, _HAMAPPLY_CHECK_L),
+    () -> _tfim_opsum(_HAMAPPLY_CHECK_L; periodic=false),
+)
+
+const tfim_check_periodic = HamiltonianSpec(
+    "tfim_check_periodic", _HAMAPPLY_CHECK_L, true,
+    () -> sitetypes(:SpinHalf, _HAMAPPLY_CHECK_L),
+    () -> _tfim_opsum(_HAMAPPLY_CHECK_L; periodic=true),
+)
+
+const hamapply_check_open = HamiltonianApplyProblem(
+    "hamapply_check_open", tfim_check_open,
+    _HAMAPPLY_CHECK_INITIAL_MAXDIM, _HAMAPPLY_CHECK_MAXDIM_VALUES, _HAMAPPLY_CUTOFF,
+)
+
+const hamapply_check_periodic = HamiltonianApplyProblem(
+    "hamapply_check_periodic", tfim_check_periodic,
+    _HAMAPPLY_CHECK_INITIAL_MAXDIM, _HAMAPPLY_CHECK_MAXDIM_VALUES, _HAMAPPLY_CUTOFF,
+)
+
+const HAMAPPLY_CHECK_PROBLEMS = (hamapply_check_open, hamapply_check_periodic)
+
 """
     build_hamapply_inputs(problem::HamiltonianApplyProblem) -> (sites, H, ψ0)
 
