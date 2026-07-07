@@ -29,7 +29,7 @@ Base.iterate(ψ::AbstractTensorTrain, args...) = iterate(tensors(ψ), args...)
 Base.eltype(::AbstractTensorTrain{T}) where {T} = T
 TensorKit.spacetype(::AbstractTensorTrain{T,S}) where {T,S} = S
 TensorKit.storagetype(::AbstractTensorTrain{T,S,A}) where {T,S,A} = A
-linkind(x::AbstractTensorTrain, pos::Int) = domain(x[pos])[end]
+linkind(x::AbstractTensorTrain, pos::Int) = (dom = domain(x[pos]); dom[length(dom)])
 linkinds(x::AbstractTensorTrain) = [linkind(x, i) for i in eachindex(x)]
 linkdims(x::AbstractTensorTrain) = dim.(linkinds(x))
 maxlinkdim(x::AbstractTensorTrain) = maximum(linkdims(x))
