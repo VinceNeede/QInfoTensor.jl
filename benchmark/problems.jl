@@ -88,11 +88,23 @@ function build_hamapply_inputs(problem::HamiltonianApplyProblem)
 end
 
 """
-    run_hamapply(H, ψ0; maxdim, cutoff) -> MPS
+    run_hamapply(H, ψ0; alg=:zipup, maxdim, cutoff) -> MPS
 
 Compute `H|ψ0⟩` via `apply`. This is the part actually timed by
 `@benchmarkable`.
+
+`cutoff` (and `sweep_maxdim`/`sweep_cutoff`) are `:zipup`-specific and are
+only passed through when `alg==:zipup`. `:src`'s `apply!` method (see
+apply.jl) only accepts `maxdim` — it has no `cutoff` keyword, since SRC's
+accuracy/speed tradeoff comes from oversampling (paper, section 3.4)
+targeting a fixed output bond dimension, not an SVD truncation tolerance.
+Passing `cutoff` through to `:src` raises a `MethodError`/keyword error,
+so it's dropped here rather than forwarded unconditionally.
 """
-function run_hamapply(H, ψ0; maxdim::Int, cutoff::Real)
-    return apply(H, ψ0; maxdim, cutoff, sweep_maxdim=2 * maxdim, sweep_cutoff=cutoff / 10)
+function run_hamapply(H, ψ0; alg::Symbol=:zipup, maxdim::Int, cutoff::Real)
+    if alg == :zipup
+        return apply(H, ψ0; alg, maxdim, cutoff, sweep_maxdim=2 * maxdim, sweep_cutoff=cutoff / 10)
+    else
+        return apply(H, ψ0; alg, maxdim)
+    end
 end
