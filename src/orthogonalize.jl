@@ -170,7 +170,7 @@ Uses TensorKit's non-destructive factorizations — safe on a shallow
 function compress!(ψ::AbstractTensorTrain; maxdim::Union{Int,Nothing}=nothing,
                     cutoff::Union{Real,Nothing}=nothing, center::Int=length(ψ))
     reset_ortho_lims!(ψ)
-    trunc = _truncation_strategy(maxdim, cutoff)
+    trunc = _svd_truncation_strategy(maxdim, cutoff)
     # no alg=:svd needed — passing a non-trivial `trunc` alone makes
     # left_orth/right_orth select an SVD-based decomposition automatically
     return _orthogonalize!(ψ, center;
@@ -188,7 +188,7 @@ shared with anything else — see mutation-convention note above.
 function compress!!(ψ::AbstractTensorTrain; maxdim::Union{Int,Nothing}=nothing,
                      cutoff::Union{Real,Nothing}=nothing, center::Int=length(ψ))
     reset_ortho_lims!(ψ)
-    trunc = _truncation_strategy(maxdim, cutoff)
+    trunc = _svd_truncation_strategy(maxdim, cutoff)
     return _orthogonalize!(ψ, center;
         leftfactorize=t -> left_orth!(t; trunc=trunc),
         rightfactorize=t -> right_orth!(t; trunc=trunc))

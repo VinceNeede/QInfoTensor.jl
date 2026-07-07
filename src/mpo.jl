@@ -216,7 +216,7 @@ function apply!(H::MPO, ψ::MPS, ::Val{:zipup};
     V_left_fused = fuse(V_mpo_left ⊗ V_mps_left)
     R_left = isomorphism(T, V_left_fused ← (V_mpo_left ⊗ V_mps_left))
  
-    strategy = _truncation_strategy(sweep_maxdim, sweep_cutoff)
+    strategy = _svd_truncation_strategy(sweep_maxdim, sweep_cutoff)
  
     for i in 1:L
         Hi, ψi = H[i], ψ[i]
@@ -387,7 +387,7 @@ function apply!(H::MPO, ψ::MPS, ::Val{:densitymatrix}; maxdim=nothing, cutoff=n
     L = length(H)
     @assert length(ψ) == L "MPO/MPS length mismatch"
 
-    strategy = _truncation_strategy(maxdim, cutoff)
+    strategy = _eig_truncation_strategy(maxdim, cutoff)
 
     E = _densitymatrix_envs(H, ψ)
 

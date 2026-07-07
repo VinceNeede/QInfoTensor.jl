@@ -357,3 +357,22 @@ end
         @test orthocenter(Hφ) == 1
     end
  end
+
+ @testset "_eig_truncation_strategy agrees with _svd_truncation_strategy" begin
+    d = 12
+    V = ℂ^d
+    M = randn(ComplexF64, V ← V)
+
+    for cutoff in (1e-3, 1e-6, 1e-9), maxdim in (nothing, 8, 20)
+        svd_strategy = QInfoTensor._svd_truncation_strategy(maxdim, cutoff)
+        _, S, _, _ = svd_trunc(M; trunc=svd_strategy)
+        r_svd = dim(domain(S)[1])
+
+        ρ = M * M'   # eigenvalues of ρ are EXACTLY the squared singular values of M
+        eig_strategy = QInfoTensor._eig_truncation_strategy(maxdim, cutoff)
+        _, V_eig, _ = eigh_trunc(ρ; trunc=eig_strategy)
+        r_eig = dim(domain(V_eig)[1])
+
+        @test r_eig == r_svd
+    end
+end
