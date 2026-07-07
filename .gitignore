@@ -27,4 +27,6 @@ Manifest*.toml
 LocalPreferences.toml
 JuliaLocalPreferences.toml
 
-benchmark/results/*
+benchmark/results/*.vscode/
+benchmark/tune.json
+trial.jl

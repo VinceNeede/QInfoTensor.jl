@@ -249,12 +249,6 @@ function _src_prepass(H::MPO, ψ::MPS, χ̄::Int, T::Type)
     C = Vector{TensorMap}(undef, L-1)
 
     V_chi = ℂ^χ̄
-    
-    Δ_arr = zeros(T, χ̄, χ̄, χ̄)
-    for d in 1:χ̄
-        Δ_arr[d, d, d] = one(T)
-    end
-    δ = TensorMap(Δ_arr, V_chi ← V_chi ⊗ V_chi)
 
     # --- Site 1 Boundary ---
     H_1 = removeunit(H[1], Val(1))
@@ -269,7 +263,15 @@ function _src_prepass(H::MPO, ψ::MPS, χ̄::Int, T::Type)
         physd = codomain(H_i)[2] # Top physical leg
         Ω_i = TensorMap(randn(T, χ̄, dim(physd)), V_chi ← physd)
         
-        @tensoropt (a, a1, a2, e, c) C[i][a; b c] := δ[a, a1, a2] * C[i-1][a1, d, e] * Ω_i[a2, f] * H_i[d, f, g, b] * ψ_i[e, g, c]
+        # --- batched outer product, replacing the δ copy-tensor ---
+        Carr = convert(Array, C[i-1])      # (a, d, e)
+        Ωarr = convert(Array, Ω_i)          # (a, f)
+        Z = Carr .* reshape(Ωarr, χ̄, 1, 1, size(Ωarr, 2))  # (a, d, e, f), O(χ̄·d·e·f)
+
+        Vd, Ve = domain(C[i-1])
+        Zmap = TensorMap(Z, V_chi ← Vd ⊗ Ve ⊗ physd)
+
+        @tensoropt (a, e, c) C[i][a; b c] := Zmap[a; d e f] * H_i[d, f, g, b] * ψ_i[e, g, c]
     end
     
     return C
