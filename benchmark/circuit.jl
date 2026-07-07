@@ -215,26 +215,24 @@ end
 
 Apply `n_steps` circuit steps (odd layer then even layer each step),
 using `apply` for each layer. `alg` selects the MPO–MPS multiplication
-algorithm (`:zipup` or `:src`).
+algorithm (`:zipup`, `:src`, or `:densitymatrix`).
 
-`cutoff` is `:zipup`-specific (an SVD truncation tolerance) and is only
-forwarded to `apply` when `alg==:zipup`; the same reasoning that applies
-to `sweep_maxdim`/`sweep_cutoff` in `run_hamapply` (see problems.jl)
-applies here — `:src`'s `apply!` method only accepts `maxdim`, and its
-own accuracy/speed tradeoff comes from oversampling (paper, section 3.4)
-rather than a tolerance, so passing `cutoff` through for `alg=:src` would
-raise a keyword-argument error. This is the part actually timed by
-`@benchmarkable`.
+`cutoff` (an SVD/eigendecomposition truncation tolerance) is forwarded
+to `apply` for every alg EXCEPT `:src` — `:src`'s `apply!` method only
+accepts `maxdim`, and its own accuracy/speed tradeoff comes from
+oversampling (paper, section 3.4) rather than a tolerance, so passing
+`cutoff` through for `alg=:src` would raise a keyword-argument error.
+This is the part actually timed by `@benchmarkable`.
 """
-function run_circuit_trajectory(ψ0, H_odd, H_even, n_steps; alg::Symbol=:zipup, maxdim::Int, cutoff::Real)
+function run_circuit_trajectory(ψ0, H_odd, H_even, n_steps; alg::Symbol=:zipup, maxdim::Union{Int, Nothing}, cutoff::Union{Real, Nothing})
     ψ = ψ0
     for _ in 1:n_steps
-        if alg == :zipup
-            ψ = QInfoTensor.apply(H_odd, ψ; alg, maxdim, cutoff)
-            ψ = QInfoTensor.apply(H_even, ψ; alg, maxdim, cutoff)
-        else
+        if alg == :src
             ψ = QInfoTensor.apply(H_odd, ψ; alg, maxdim)
             ψ = QInfoTensor.apply(H_even, ψ; alg, maxdim)
+        else
+            ψ = QInfoTensor.apply(H_odd, ψ; alg, maxdim, cutoff)
+            ψ = QInfoTensor.apply(H_even, ψ; alg, maxdim, cutoff)
         end
     end
     return ψ

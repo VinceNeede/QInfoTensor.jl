@@ -131,18 +131,20 @@ end
 Compute `H|ψ0⟩` via `apply`. This is the part actually timed by
 `@benchmarkable`.
 
-`cutoff` (and `sweep_maxdim`/`sweep_cutoff`) are `:zipup`-specific and are
-only passed through when `alg==:zipup`. `:src`'s `apply!` method (see
-apply.jl) only accepts `maxdim` — it has no `cutoff` keyword, since SRC's
-accuracy/speed tradeoff comes from oversampling (paper, section 3.4)
-targeting a fixed output bond dimension, not an SVD truncation tolerance.
+`cutoff` is only forwarded when `alg != :src`. `:src`'s `apply!` method
+(see apply.jl) only accepts `maxdim` — it has no `cutoff` keyword, since
+SRC's accuracy/speed tradeoff comes from oversampling (paper, section
+3.4) targeting a fixed output bond dimension, not a truncation tolerance.
 Passing `cutoff` through to `:src` raises a `MethodError`/keyword error,
-so it's dropped here rather than forwarded unconditionally.
+so it's dropped for that one case. `:zipup` and `:densitymatrix` both
+accept `cutoff` (an SVD truncation tolerance for `:zipup`, an
+eigendecomposition truncation tolerance for `:densitymatrix`), so both
+get it forwarded via the same `else` branch.
 """
 function run_hamapply(H, ψ0; alg::Symbol=:zipup, maxdim::Int, cutoff::Real)
-    if alg == :zipup
-        return apply(H, ψ0; alg, maxdim, cutoff, sweep_maxdim=2 * maxdim, sweep_cutoff=cutoff / 10)
-    else
+    if alg == :src
         return apply(H, ψ0; alg, maxdim)
+    else
+        return apply(H, ψ0; alg, maxdim, cutoff)
     end
 end

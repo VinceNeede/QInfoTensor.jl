@@ -28,10 +28,14 @@ include(joinpath(@__DIR__, "random_apply.jl"))
 # target+baseline — this is what silently ate 20+ minutes with zero
 # visible progress before this file had any logging in it).
 #
-# Checked for both APPLY_ALGS (:zipup and :src) — :src is a randomized
-# algorithm (Camaño, Epperly & Tropp 2025), so its own correctness at
-# near-exact bond dimension is exactly as worth re-confirming here as
-# :zipup's, not something safe to assume by analogy.
+# Checked for all three APPLY_ALGS (:zipup, :src, :densitymatrix) — :src
+# is a randomized algorithm (Camaño, Epperly & Tropp 2025), so its own
+# correctness at near-exact bond dimension is exactly as worth
+# re-confirming here as the other two, not something safe to assume by
+# analogy. :densitymatrix is deterministic (no randomness to validate the
+# same way SRC's is), but is checked identically anyway since it's a
+# newly-added, separately-implemented algorithm with its own leg-
+# convention bugs to catch (see chat).
 #
 # Two DIFFERENT checks are needed, because the two problem types have
 # different notions of "correct":
@@ -48,7 +52,7 @@ include(joinpath(@__DIR__, "random_apply.jl"))
 #     generic test elsewhere).
 # ---------------------------------------------------------------------------
 
-const APPLY_ALGS = (:zipup, :src)
+const APPLY_ALGS = (:zipup, :src, :densitymatrix)
 
 function _check_circuit_correctness(problem::CircuitProblem, alg::Symbol)
     _, ψ0, H_odd, H_even = build_circuit_inputs(problem)

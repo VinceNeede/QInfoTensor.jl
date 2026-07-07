@@ -184,8 +184,8 @@ end
 
 Compute `H|ψ0⟩` via `apply`. Same alg-dependent kwarg filtering as
 `run_hamapply` (see problems.jl): `:src`'s `apply!` method only accepts
-`maxdim`, so `cutoff`/`sweep_maxdim`/`sweep_cutoff` are only forwarded
-when `alg==:zipup`.
+`maxdim`, so `cutoff` is only forwarded for `alg != :src` (i.e. for
+`:zipup` and `:densitymatrix`).
 
 `cutoff` defaults to `nothing` here — NOT the small-but-nonzero `1e-14`
 used elsewhere in the benchmark suite (`run_hamapply`,
@@ -214,9 +214,9 @@ whether that numerical pathology is present, since it matches the
 paper's actual comparison protocol either way. See chat.)
 """
 function run_random_apply(H, ψ0; alg::Symbol=:zipup, maxdim::Int, cutoff::Union{Real,Nothing}=nothing)
-    if alg == :zipup
-        return apply(H, ψ0; alg, maxdim, cutoff, sweep_maxdim=2 * maxdim, sweep_cutoff=cutoff)
-    else
+    if alg == :src
         return apply(H, ψ0; alg, maxdim)
+    else
+        return apply(H, ψ0; alg, maxdim, cutoff)
     end
 end

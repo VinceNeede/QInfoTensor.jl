@@ -4,8 +4,12 @@
 # verify_circuit_equivalence.jl (physical correctness check).
 #
 # ITensorMPS.apply(H::MPO, ψ::MPS; ...) defaults to alg="densitymatrix" —
-# must explicitly request alg="zipup" to match QInfoTensor's apply
-# algorithm (Stoudenmire & White 2010).
+# both `"zipup"` and `"densitymatrix"` are requested EXPLICITLY here (via
+# `run_itensor_circuit_trajectory`'s own `alg` kwarg) to match whichever
+# of QInfoTensor's two implemented algorithms (Stoudenmire & White 2010's
+# zip-up, or the density-matrix algorithm — see
+# https://tensornetwork.org/mps/algorithms/denmat_mpo_mps/) is currently
+# being benchmarked, rather than relying on either side's own default.
 # ---------------------------------------------------------------------------
 
 """
@@ -63,35 +67,60 @@ function build_itensor_circuit_inputs(problem::CircuitProblem)
 end
 
 """
-    run_itensor_circuit_trajectory(ψ0, H_odd, H_even, n_steps; maxdim=nothing, cutoff=nothing,
+    run_itensor_circuit_trajectory(ψ0, H_odd, H_even, n_steps; alg=:zipup, maxdim=nothing, cutoff=nothing,
                                     sweep_maxdim=nothing, sweep_cutoff=nothing) -> MPS
 
-ITensor analog of `run_circuit_trajectory` (circuit.jl).
+ITensor analog of `run_circuit_trajectory` (circuit.jl). `alg` selects
+ITensor's own `apply` algorithm (`"zipup"` or `"densitymatrix"`),
+matching QInfoTensor's `alg=:zipup`/`alg=:densitymatrix`.
 
-ITensor's zipup method has two distinct truncation levels (see
-`ITensors.contract(::Algorithm"zipup", A::MPO, B::AbstractMPS; cutoff,
-maxdim, mindim, truncate_kwargs=(;cutoff,maxdim,mindim), kwargs...)`):
-- direct `cutoff`/`maxdim`/`mindim`: truncation during the zip-up
-  contraction sweep itself — corresponds to QInfoTensor's
-  `sweep_cutoff`/`sweep_maxdim`.
-- `truncate_kwargs`: final compression pass — corresponds to
-  QInfoTensor's `maxdim`/`cutoff`.
+The two ITensor algorithms need GENUINELY DIFFERENT kwarg shapes, not
+just different `alg` strings — confirmed against ITensorMPS's own
+`contract` methods:
 
-With `sweep_maxdim=nothing, sweep_cutoff=nothing` (default, matching
-circuit.jl's usage), the direct parameters are ITensor's own "no
-truncation" defaults, and all real truncation happens in
-`truncate_kwargs` — exactly matching QInfoTensor's side.
+- `:zipup` has two distinct truncation levels (see
+  `ITensors.contract(::Algorithm"zipup", A::MPO, B::AbstractMPS; cutoff,
+  maxdim, mindim, truncate_kwargs=(;cutoff,maxdim,mindim), kwargs...)`):
+  direct `cutoff`/`maxdim`/`mindim` truncate during the zip-up sweep
+  itself (QInfoTensor's `sweep_cutoff`/`sweep_maxdim`), while
+  `truncate_kwargs` is a separate final compression pass (QInfoTensor's
+  `maxdim`/`cutoff`). With `sweep_maxdim=nothing, sweep_cutoff=nothing`
+  (default), the direct parameters are ITensor's own "no truncation"
+  defaults, and all real truncation happens in `truncate_kwargs` —
+  matching QInfoTensor's side.
+- `:densitymatrix` has NO such two-tier split (confirmed via
+  `ITensors.contract(::Algorithm"densitymatrix", A::MPO, ψ::MPS; cutoff,
+  maxdim, mindim, normalize=false, kwargs...)`) — a single flat
+  `cutoff`/`maxdim`/`mindim`, applied directly at each site of the one
+  sweep. This matches QInfoTensor's own `apply!(...,Val(:densitymatrix))`
+  signature (`maxdim`, `cutoff`, no `sweep_*` kwargs at all — see its
+  docstring). `sweep_maxdim`/`sweep_cutoff` are therefore simply IGNORED
+  when `alg=:densitymatrix` (not forwarded to `ITensorMPS.apply` at all)
+  rather than mapped onto anything — there's no equivalent concept to
+  map them to.
 """
 function run_itensor_circuit_trajectory(ψ0, H_odd, H_even, n_steps;
+                                         alg::Symbol=:zipup,
                                          maxdim=nothing, cutoff=nothing,
                                          sweep_maxdim=nothing, sweep_cutoff=nothing)
-    apply_kwargs = (
-        alg="zipup",
-        cutoff=sweep_cutoff,
-        maxdim=sweep_maxdim,
-        mindim=1,
-        truncate_kwargs=(cutoff=cutoff, maxdim=maxdim, mindim=1),
-    )
+    apply_kwargs = if alg == :zipup
+        (
+            alg="zipup",
+            cutoff=sweep_cutoff,
+            maxdim=sweep_maxdim,
+            mindim=1,
+            truncate_kwargs=(cutoff=cutoff, maxdim=maxdim, mindim=1),
+        )
+    elseif alg == :densitymatrix
+        (
+            alg="densitymatrix",
+            cutoff=cutoff,
+            maxdim=maxdim,
+            mindim=1,
+        )
+    else
+        throw(ArgumentError("run_itensor_circuit_trajectory: unsupported alg=$alg (expected :zipup or :densitymatrix)"))
+    end
 
     ψ = ψ0
     for _ in 1:n_steps

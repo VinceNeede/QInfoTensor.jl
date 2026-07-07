@@ -3,16 +3,17 @@
 #   SUITE["apply"]["circuit"][name]["alg=$alg"]["maxdim=$χ"]
 #   SUITE["apply"]["hamiltonian"][name]["alg=$alg"]["maxdim=$χ"]
 #   SUITE["apply"]["random"][name]["alg=$alg"]["maxdim=$χ"]
-# for alg in APPLY_ALGS (:zipup, :src — see benchmarks.jl).
+# for alg in APPLY_ALGS (:zipup, :src, :densitymatrix — see benchmarks.jl).
 #
 # "random" uses RANDOM_APPLY_PROBLEMS (random_apply.jl): synthetic
 # random MPO/MPS with large D=χ=50, mirroring the SRC paper's own Figure
 # 1/section 4.4.2 setup. This is the ONLY problem family here with
 # D,χ ≫ 1 and steep compression (χ̄ ≪ D·χ) — the regime the paper's own
-# results (and ours) show SRC's asymptotic advantage actually shows up
-# in. circuit/hamiltonian both have MPO bond dimension D≤4, too small to
-# see a difference (see chat) — kept for their own regression-tracking
-# value, not as a test of SRC's claimed speed advantage.
+# results (and ours) show SRC's asymptotic advantage over the OTHER
+# algorithms actually shows up in. circuit/hamiltonian both have MPO bond
+# dimension D≤4, too small to see a difference (see chat) — kept for
+# their own regression-tracking value (now across all three algs), not
+# as a test of SRC's claimed speed advantage.
 #
 # Inputs (sites/ψ0/H_odd/H_even, or sites/H/ψ0, or H/ψ0) are built once
 # per problem, OUTSIDE the timed benchmark and shared across both algs —
