@@ -5,8 +5,9 @@
 **Status:** core functionality implemented, tested, and benchmarked
 (including a speed/memory comparison against ITensor) — `SiteType`/`op`/`state`
 dispatch, `MPS`/`MPO` containers, orthogonalization, compression,
-`OpSum`→`MPO` construction, `inner`/`norm`/`normalize`, and two `H|ψ⟩`
-algorithms (zip-up and SRC, see "Planned algorithms" below).
+`OpSum`→`MPO` construction, `inner`/`norm`/`normalize`, and three `H|ψ⟩`
+algorithms (zip-up, SRC, and density matrix — see "MPO-MPS contraction:
+choosing an algorithm" below for when to use each).
 **Currently restricted to `Trivial` (unsymmetrized)
 sites** — see "Current scope" below. See `design_notes.md` for the full
 implementation history, resolved design decisions, and open questions.
@@ -48,8 +49,47 @@ support and the next major piece of design work.
 - **Construction**: `random_mps`, product-state `MPS(sites, states)` (accepts `StateName`, `String`, or `Symbol` state labels), `sitetypes` (bulk `SiteType` construction).
 - **Hamiltonian construction**: `OpSum`/`add!`, FSM-based `MPO(::OpSum, sites)`.
 - **Expectation values & overlaps**: `inner(ψ,φ)`, `inner(ψ,H,φ)`, `norm`/`normalize`/`normalize!`/`normalize!!` (MPS, requires an orthogonality center), `maxlinkdim`/`linkdims`/`linkinds`/`linkind` (bond-dimension introspection, generic over `AbstractTensorTrain`).
-- **Operator application**: `apply!`/`apply` for `H|ψ⟩`, two algorithms — zip-up (`alg=:zipup`, following Paeckel et al. 2019 for default truncation parameters) and SRC (`alg=:src`, Successive Randomized Compression, Camaño, Epperly & Tropp 2025); `Trivial`-sector only for both, `:src` additionally has no `cutoff` (rank-only truncation, matching the paper's own methodology).
+- **Operator application**: `apply!`/`apply` for `H|ψ⟩`, three algorithms — zip-up (`alg=:zipup`, following Paeckel et al. 2019 for default truncation parameters), SRC (`alg=:src`, Successive Randomized Compression, Camaño, Epperly & Tropp 2025), and density matrix (`alg=:densitymatrix`, ported from ITensor's own implementation); `Trivial`-sector only for all three, `:src` additionally has no `cutoff` (rank-only truncation, matching the paper's own methodology). See "MPO-MPS contraction: choosing an algorithm" below for when to use each.
 - **Benchmarking**: a `PkgBenchmark`-based suite (comparing `:zipup` vs. `:src` directly) and a speed/memory comparison against ITensor (see below).
+
+## MPO-MPS contraction: choosing an algorithm
+
+`apply(H, ψ; alg, maxdim, cutoff)` implements `H|ψ⟩` three ways. They
+trade off speed, accuracy, and applicable regime differently — there's
+no single default that's best everywhere.
+
+| | `:zipup` | `:src` | `:densitymatrix` |
+|---|---|---|---|
+| **Speed** | Fast, single pass | Fastest *when* `D,χ≫1` and genuine compression is needed (`χ̄≪Dχ`); at par or worse otherwise | Slowest of the three (structural — needs a full untruncated environment pass before any compression) |
+| **Accuracy** | Good, not near-optimal (truncates using only a partial environment) | Comparable to `:zipup`; randomized, not exact | Near-optimal (matches SVD-quality contract-then-compress) |
+| **`cutoff` support** | Yes | No — rank-only (`maxdim`), matching the paper's own methodology | Yes |
+| **Symmetry** | `Trivial` only (planned to extend) | `Trivial` only, and won't preserve symmetry even once other algorithms do (paper §3.7) | `Trivial` only |
+
+**`:zipup` — the default for most problems.** Fast, works well across
+the small-to-moderate bond dimensions typical of circuit simulation and
+short-range Hamiltonians (gate-layer MPOs, nearest-neighbor terms — bond
+dimension `D` usually ≤4-10). Reach for this first unless you have a
+specific reason to reach for one of the others.
+
+**`:src` — for large, steeply-compressible problems specifically.**
+Genuinely faster than `:zipup` only once `D,χ≫1` *and* the requested
+`maxdim` represents real compression (`maxdim≪D·χ`) — confirmed
+empirically via a synthetic `n=100,D=χ=50` benchmark, where the speed
+advantage grows from roughly at-par at `maxdim=5` to ~1.7× faster at
+`maxdim=100`. On typical short-range circuit/Hamiltonian problems (small
+`D`), it doesn't have room to show this advantage and isn't the better
+choice. No `cutoff` — if you need tolerance-based (rather than
+fixed-rank) truncation, this isn't the algorithm for that.
+
+**`:densitymatrix` — when accuracy matters more than speed.** Produces
+near-optimal truncation (same quality tier as `:zipup`'s eventual
+`compress!` pass, but reached directly rather than via a separate final
+sweep), at a real, structural time cost — even after a real performance
+fix (see `design_notes.md`), it remains the slowest of the three,
+consistent with the algorithm's own documented characteristics
+elsewhere in the literature. Reach for this when you specifically need
+the best achievable truncation and can afford the extra time, not as a
+default.
 
 ## Benchmarking
 
@@ -74,13 +114,21 @@ relative truncation cutoff) before this comparison became meaningful.
 
 `benchmark/compare_itensor.jl` compares against ITensor on the same
 circuit benchmark (`Trivial` sites, single-threaded, controlled BLAS/
-`Strided.jl` thread counts on both sides). Current result, reproduced
-twice: QInfoTensor is consistently faster (~1.3×–2.6×, largest at small
-bond dimension, shrinking as `maxdim` grows) and consistently lower
-memory (~2.2×–2.6×, flat across the whole tested range). This is a
-`Trivial`-sites comparison — see `design_notes.md` for caveats and for
-where a symmetric-tensor comparison could show a more fundamental
-advantage once that support lands.
+`Strided.jl` thread counts on both sides), for both `:zipup` and
+`:densitymatrix` (`:src` has no ITensor-side equivalent to compare
+against). `:zipup` result, reproduced twice: QInfoTensor is consistently
+faster (~1.3×–2.6×, largest at small bond dimension, shrinking as
+`maxdim` grows) and consistently lower memory (~2.2×–2.6×, flat across
+the whole tested range). `:densitymatrix` is currently ~3-9% slower than
+ITensor's own implementation despite lower memory — traced to a real
+upstream TensorKit performance issue (unnecessary allocation in
+`sectorequal`, affecting `:zipup` too — see `design_notes.md`). A
+working fix was prototyped and confirmed to close/reverse this gap, but
+deliberately not adopted locally (type piracy against a non-public
+TensorKit internal, not justified by a 3-7% gain) — reporting upstream
+instead. Both are `Trivial`-sites comparisons — see `design_notes.md`
+for caveats and for where a symmetric-tensor comparison could show a
+more fundamental advantage once that support lands.
 
 ## Planned algorithms
 
@@ -88,6 +136,7 @@ Ported from an existing dense (non-symmetric) prototype library, roughly in orde
 
 1. ~~**Zip-up** MPO–MPS contraction — single-pass, sequential.~~ Implemented as `apply!(...,Val(:zipup))`.
 2. ~~**SRC** (Successive Randomized Compression; Camaño, Epperly & Tropp 2025, arXiv:2504.06475).~~ Implemented as `apply!(...,Val(:src))` and benchmarked directly against zip-up (see "Benchmarking" above); not symmetry-preserving, consistent with current `Trivial`-only scope and the paper's own stated limitation (§3.7).
+2b. ~~**Density matrix** (see https://tensornetwork.org/mps/algorithms/denmat_mpo_mps/).~~ Implemented as `apply!(...,Val(:densitymatrix))`, ported from ITensor's own implementation; slower than zip-up on wall-clock time (structural — see "MPO-MPS contraction" above), and currently ~3-9% slower than ITensor's own implementation too, pending a real upstream TensorKit performance fix that was found and prototyped but deliberately not adopted locally (type piracy, not justified by the modest gain — see `design_notes.md`).
 3. **DMRG3S** (Hubig, McCulloch, Schollwöck, Wolf 2015, arXiv:1501.05504) — strictly single-site DMRG with subspace expansion. Not yet started; MPSKit's closest analog (`changebonds` with `OptimalExpand`) is a separate step, not fused into the local update the way DMRG3S needs. Listed here out of the original expected-difficulty order — SRC (above) turned out to be tractable sooner — and now has a real `apply!`/`inner` foundation (both algorithms) to build the local update on top of.
 
 ## Longer-term direction

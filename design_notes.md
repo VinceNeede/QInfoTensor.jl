@@ -9,11 +9,12 @@ kept up to date the same way, alongside the code it documents.
 
 **Status update**: core types, `SiteType`/`op`/`state`, MPS/MPO
 containers, orthogonalization, compression, `OpSum`→MPO construction,
-`inner`/`norm`/`normalize`, zip-up `apply!`, SRC `apply!`, a benchmark
-suite (now comparing both algorithms directly, including a synthetic
-random-tensor problem specifically targeting SRC's claimed regime), and
-a comparison against ITensor are all implemented and tested (`Trivial`
-sites only — see "Current scope" below). This file has
+`inner`/`norm`/`normalize`, and all three `apply!` algorithms (zip-up,
+SRC, density matrix), a benchmark suite (comparing all three directly,
+including a synthetic random-tensor problem specifically targeting SRC's
+claimed regime), and a comparison against ITensor (both `:zipup` and
+`:densitymatrix`) are all implemented and tested (`Trivial` sites only —
+see "Current scope" below). This file has
 been rewritten to reflect the actual, tested implementation rather than
 the original pre-implementation plan; see git history for the original
 version if the historical reasoning is needed.
@@ -500,7 +501,158 @@ attempt to preserve it, so it isn't symmetry-preserving even in
 principle without further design work (the paper explicitly flags this
 as future work, not something they solved).
 
-## Benchmark suite (`benchmark/`)
+## `apply!`/`apply` (density matrix)
+
+`apply!(H, ψ, Val(:densitymatrix); maxdim=nothing, cutoff=nothing)`
+implements the density-matrix algorithm (see
+https://tensornetwork.org/mps/algorithms/denmat_mpo_mps/), ported from
+ITensor's `contract(::MPO,::MPS; method="densitymatrix")`: a right-to-left
+sweep truncating each site by eigendecomposing a running Hermitian
+"density matrix" `ρ`, built from a full left-environment forward pass
+(`_densitymatrix_envs`) plus a running right-environment (`R`, updated
+each sweep step). Structurally different from `:zipup`/`:src` — this is
+the only one of the three requiring a full untruncated forward pass
+before any compression can begin, since the eigendecomposition needs the
+complete environment to determine the optimal truncation.
+
+**Ket/bra split, derived not assumed**: `E[i]`'s ket legs go in
+*domain*, bra legs in *codomain* — opposite of the initially-guessed
+split — derived from the pairing rule (domain pairs validly against
+fresh/plain without `conj`; codomain needs its partner conjugated) and
+confirmed via Hermiticity (`‖E-E'‖/‖E‖ ~ 1e-16`) at every step.
+
+**Site-tensor storage needs `permute`+`flip`, not `conj`.** `eigh_trunc(ρ)`
+returns `V` with `codomain` matching `ρ`'s own codomain — for a boundary
+site this is `(phys,)`; for a middle site, `(phys,prevbond)`. Neither
+matches `MPSTensor`'s required `(left,phys)` codomain order, so `V` needs
+reordering via `TensorKit.permute` using global flattened positions (same
+convention already established for `_gate_to_mpo_tensors`). Confirmed
+empirically: **any leg that crosses the codomain/domain boundary via
+`permute` comes out dual**, regardless of direction (a `permute`-specific
+confirmation of the project's existing "bending introduces a dual" rule);
+legs that don't cross stay plain. Both crossed legs need an explicit
+`flip` afterward to restore the plain-space storage convention every
+other `MPSTensor` uses. `V` itself (not `V'`, ITensor's `Ut`) is what's
+stored — TensorKit's dual-space bookkeeping already encodes the ket/bra
+distinction structurally, so there's no need for ITensor's separate
+`U`/`Ut` pair at all; the bare function `conj` doesn't exist for
+`TensorMap` (`Base.conj` is only defined for `Sector`s, i.e. charge
+conjugation — confirmed by a direct `MethodError`), which is what
+motivated finding `permute`+`flip` in the first place rather than the
+originally-planned `conj`.
+
+**Determining which leg is "left" vs "right" requires tracing sweep
+adjacency, not guessing.** An earlier version of the middle-site
+`permute` call put the incoming (already-processed, carried-over) bond in
+`codomain` and the fresh bond in `domain` — backwards. The correct rule,
+confirmed by tracing shared-bond adjacency between consecutive sites in
+the right-to-left sweep: site `i`'s fresh `eigh_trunc` output is *always*
+`i`'s own **left** bond (connects to the not-yet-processed site `i-1`);
+the bond carried in from the already-processed site `i+1` is *always*
+`i`'s **right** bond. The boundary-site case (validated first,
+unambiguous since its "right" is forced to be the trivial dimension-1
+end) confirmed this pattern before it was generalized to middle sites.
+
+**Truncation strategy needs its own exponent, not the SVD one reused.**
+`_svd_truncation_strategy` (used by `:zipup`'s `tsvd`) sets
+`rtol=sqrt(cutoff)`, correct because `truncerror`'s default `p=2` bounds
+`Σ(discarded σᵢ²)/Σ(all σᵢ²)` — singular values need squaring to reach
+the weight scale `cutoff` is defined on. Reusing this for `eigh_trunc`
+was a real bug: eigenvalues `λᵢ=σᵢ²` are *already* on that scale, so
+`p=2` there bounds `Σλᵢ²/Σ(all λᵢ²)` — a relative-`σ⁴`-weight criterion,
+squaring an already-squared quantity. Confirmed via
+`MatrixAlgebraKit._truncerr_impl`'s actual source (`by = abs(v)^p`), not
+inferred: the fix is `_eig_truncation_strategy(maxdim,cutoff) =
+truncrank(maxdim) & truncerror(rtol=cutoff, p=1)` — no `sqrt`, `p=1`
+directly, since `λᵢ` needs no further transform. Empirically confirmed
+via a real bug reproduction: `p=2,rtol=sqrt(cutoff)` collapsed a
+`maxdim=320` request to a hard-capped `maxlinkdim=64` regardless of the
+requested value (relative-cutoff pathology, not a `maxdim` bug — same
+*symptom* as SRC's earlier unnormalized-data collapse, different cause);
+`p=1,rtol=cutoff` reproduced `:zipup`'s achieved bond dimension exactly.
+
+**Upstream TensorKit performance issue, found via profiling — reported,
+not patched locally.** Profiling `apply!(...,Val(:densitymatrix))`
+against ITensor (same circuit problem, `maxdim=320`) found QInfoTensor
+3-9% slower despite using less memory — traced (allocation-profiling by
+*type*, not just size — sorting by size alone missed this entirely) to
+`TensorKit.sectorequal`, which for `Trivial` sectors falls through to
+`Base.issetequal`'s fully generic fallback: materializing a full hash
+`Set` (`Dict`+3 backing `Memory` arrays) just to compare two
+`OneOrNoneIterator{Trivial}` objects, each holding *at most one element*.
+This call site alone accounted for ~35-40% of total allocations in
+**both** `:zipup` and `:densitymatrix` (confirmed via a like-for-like
+allocation-count comparison — a shared TensorKit cost, not specific to
+either algorithm).
+
+A prototype fix was built and *tested* to confirm the diagnosis —
+deliberate type piracy (`Base.issetequal(::OneOrNoneIterator{G},
+::OneOrNoneIterator{G})`, zero-allocation `isempty`/`only`-based
+comparison), confirmed effective (`Dict{Trivial,Nothing}` allocation
+count dropped ~480×, 50,758→105 for `:zipup`; a same-session, repeated
+(n=8), same-BLAS-backend comparison against ITensor showed QInfoTensor
+flip from ~3-9% slower to ~1-7% *faster*, all 8 repeats agreeing in
+direction). **Deliberately NOT kept in the codebase** — decided the
+maintenance risk of type piracy against an unexported, non-public
+TensorKit internal (`OneOrNoneIterator` could be silently renamed,
+restructured, or have its interface change in any future TensorKit
+release, independent of semver) isn't justified by a 3-7% gain. Current
+state is the pre-patch one: QInfoTensor genuinely ~3-9% slower than
+ITensor's own `:densitymatrix` at this problem size, both algorithms
+still carrying the unfixed TensorKit overhead. Plan: report the finding
+upstream (issue, possibly PR — the prototype fix above is a working
+starting point) rather than absorb it locally; revisit once resolved
+there. A smaller, uninvestigated second instance of the same `Set`-based
+pattern was found in `isisomorphic`/`removeunit` (~100× smaller by
+allocation count than the `sectorequal` one) — not chased further,
+same reporting-not-patching reasoning would apply if pursued.
+
+**Margin, if the upstream fix lands, is expected to be real but
+modest** — not a reason to deprioritize reporting it, just a reason not
+to have patched it locally. Index/space bookkeeping overhead is a
+roughly fixed *per-operation* cost, while the dominant remaining costs
+(`heevr!`/LAPACK diagonalization, BLAS-backed contractions) are
+FLOP-bound and identical between implementations once both confirmed on
+the same BLAS backend. The relative benefit of avoiding fixed overhead
+necessarily shrinks as problem size grows and FLOP-bound work dominates
+a larger total — the same pattern already documented for `:zipup`
+("largest at small bond
+dimension, shrinking as `maxdim` grows"); `maxdim=320` sits at the
+large, compute-dominated end of that same curve. Not verified: whether
+the margin is larger at small `maxdim`, matching the `:zipup` curve's
+shape (plausible, not yet run).
+
+**Buffer-reuse/allocator-level optimization — investigated, not
+pursued.** `_densitymatrix_envs`'s per-step contraction was
+allocation-dominated in time profiling (~87% of forward-pass time in
+`tensoralloc_add`), suggesting temporaries as a target. Reordering into
+an explicit sequential contraction (mirroring ITensor's own
+`E[j]=E[j-1]*ψ[j]*A[j]*A_c[j]*ψ_c[j]` structure) was tried and made
+negligible difference to either allocation count or time — `@tensoropt`
+already compiles to pairwise `tensorcontract!` calls regardless of
+source-level grouping. Manually reusing a *specific* dead tensor (e.g.
+`E[i]`, unused at reverse-sweep iteration `i` since it was already
+consumed one iteration earlier, at `i+1`, given the sweep runs in
+decreasing order) as a buffer for a differently-shaped tensor doesn't
+work directly — codomain/domain splits differ, and `TensorMap` storage
+is organized around that split, so reuse would need a `repartition`-like
+step costing about as much as a fresh allocation. `TensorOperations.jl`
+does expose a real pluggable allocator system (`ManualAllocator()`,
+Bumper.jl arena integration via `@no_escape`) that targets this
+generically rather than needing exact shape matches — not yet tried;
+Bumper specifically needs care since anything allocated inside `@no_escape`
+must not escape the block, and `E[i]`/final sweep outputs must persist
+well beyond their construction. Deprioritized for now given the
+`sectorequal` fix already closed the ITensor-comparison gap, and
+allocation-count reduction was separately confirmed NOT to track time
+1:1 (the `_densitymatrix_envs`-alone allocation count dropped ~4× from
+the `sectorequal` fix with `_densitymatrix_envs`'s own median time
+moving only ~6%) — further allocator-level work would need to specifically
+target the large, few, genuinely-necessary buffer allocations
+(`tensoralloc_add` for actual contraction outputs), not allocation count
+generally.
+
+
 
 `PkgBenchmark`-based: `apply!` over a brickwork circuit trajectory
 (`circuit_L20`/`circuit_L50`, sweeping `maxdim`) and over a single
@@ -732,6 +884,22 @@ charged-operator/symmetric-construction work above to land first.
    silently return the wrong leg rather than erroring. Worth revisiting
    if a third `AbstractTensorTrain` subtype is ever added.
 
+11. **Upstream TensorKit `sectorequal`/`issetequal` fix** — found and
+   prototyped (see "`apply!`/`apply` (density matrix)" above), but
+   deliberately NOT applied in this codebase: the type-piracy risk
+   (unexported, non-public `TensorKit.OneOrNoneIterator`, no semver
+   protection) wasn't judged worth it for a 3-7% gain. Not yet reported
+   upstream either — next step is filing an issue (the prototype fix is
+   a working starting point if a PR ends up being the better path).
+   Until then, `:densitymatrix` (and to a lesser, unmeasured extent
+   `:zipup`) carry this overhead unmitigated.
+12. **`:densitymatrix` vs ITensor margin at small `maxdim`** — not yet
+   measured; hypothesized (by analogy with `:zipup`'s already-confirmed
+   pattern) to be larger than the modest ~1-7% seen at `maxdim=320`,
+   since fixed per-operation bookkeeping overhead should be a bigger
+   fraction of a smaller, less FLOP-dominated total. Cheap to check,
+   just not yet run.
+
 ## Roadmap (actual order, for reference)
 
 1. ~~Core types: `SiteType`, `space`, `MPSTensor`, `MPOTensor`, MPS/MPO
@@ -749,6 +917,18 @@ charged-operator/symmetric-construction work above to land first.
    compression) via `RandomApplyProblem`; not symmetry-preserving,
    consistent with current `Trivial`-only scope and the paper's own
    stated limitation.
+6b. ~~**Density matrix**~~ Done — see "`apply!`/`apply` (density
+   matrix)" above. Ported from ITensor's own implementation; incidentally
+   surfaced a real upstream TensorKit performance issue
+   (`sectorequal`/`issetequal`, affecting `:zipup` too) — a working fix
+   was prototyped and confirmed effective, but deliberately NOT kept in
+   the codebase (type piracy against an unexported TensorKit internal,
+   not justified by a 3-7% gain); to be reported upstream instead.
+   Slower than `:zipup` on wall-clock time (structural, matches the
+   algorithm's own documented characteristics — full untruncated forward
+   pass required), and currently still slower than ITensor's own
+   implementation of the same algorithm (~3-9% at `maxdim=320`), pending
+   the upstream fix.
 7. **DMRG3S** — not started. No direct MPSKit equivalent to lean on, per
    the original notes; now also has a real `apply!`/`inner` foundation
    (both algorithms) to build the local update on top of.
