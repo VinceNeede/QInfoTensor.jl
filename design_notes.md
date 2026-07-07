@@ -9,8 +9,10 @@ kept up to date the same way, alongside the code it documents.
 
 **Status update**: core types, `SiteType`/`op`/`state`, MPS/MPO
 containers, orthogonalization, compression, `OpSum`→MPO construction,
-`inner`/`norm`/`normalize`, zip-up `apply!`, a benchmark suite, and a
-comparison against ITensor are all implemented and tested (`Trivial`
+`inner`/`norm`/`normalize`, zip-up `apply!`, SRC `apply!`, a benchmark
+suite (now comparing both algorithms directly, including a synthetic
+random-tensor problem specifically targeting SRC's claimed regime), and
+a comparison against ITensor are all implemented and tested (`Trivial`
 sites only — see "Current scope" below). This file has
 been rewritten to reflect the actual, tested implementation rather than
 the original pre-implementation plan; see git history for the original
@@ -444,6 +446,60 @@ the pre-contraction plain spaces would mismatch).
 over) rather than something `compress!` actually depends on being
 correct.
 
+## `apply!`/`apply` (SRC — successive randomized compression)
+
+`apply!(H, ψ, Val(:src); maxdim)` implements Camaño, Epperly & Tropp
+2025 (arXiv:2504.06475), Algorithm 1: a single right-to-left pass
+building an MPS `η ≈ H|ψ⟩` in right canonical form via a sequence of
+randomized QB decompositions, reusing one shared set of Khatri–Rao
+random matrices `Ω⁽¹⁾,...,Ω⁽ⁿ⁻¹⁾` across every step (the paper's own
+Theorem 3: this reuse doesn't compromise exact recovery, despite the
+steps being dependent rather than independent draws). Unlike `:zipup`,
+`:src` takes **no `cutoff`** — truncation is to a specified bond
+dimension only, no relative-tolerance criterion (matches the paper's own
+methodology throughout; see "Benchmark suite" below for why this
+distinction mattered in practice, not just in principle).
+
+**Prepass optimization — batched outer product replaces a naive copy
+tensor.** The paper's own pseudocode (Algorithm 1, line 4) has a
+"batch index" `a` shared across `C⁽ⁱ⁻¹⁾`, `Ω⁽ⁱ⁾`, and the output — i.e.
+elementwise on that index, not summed. `@tensor`/`TensorOperations` has
+no native syntax for a label appearing in two operands *and* the output
+(no batched-matmul primitive), so the first implementation worked around
+this via an explicit dense `χ̄×χ̄×χ̄` diagonal (copy) tensor `δ`, contracted
+in normally. This was **correct but asymptotically wrong**: `@tensor`'s
+optimizer has no way to know `δ` is sparse, so any contraction order
+fusing it with one operand before the other produces an intermediate
+with **two independent `χ̄`-sized legs** (e.g. `(a,a2,d,e)`, size
+`χ̄²·m·n`) — an extra factor of `χ̄` above the paper's own stated
+`O(χ̄)`-per-step scaling (eq. 3.3), which matters a lot once `χ̄` is large
+(the whole point of using SRC in the first place).
+
+Fixed by dropping to plain `Array`s for this one step (`Trivial`-sector
+scope makes this safe — no symmetry-block structure to lose) and
+computing the batch/outer-product via broadcasting:
+```julia
+Carr = convert(Array, C[i-1])      # (a, d, e)
+Ωarr = convert(Array, Ω_i)          # (a, f)
+Z = Carr .* reshape(Ωarr, χ̄, 1, 1, size(Ωarr,2))  # (a, d, e, f), O(χ̄·d·e·f)
+```
+Julia's broadcasting semantics give exactly the batch-index contraction
+diagram intends — `a` matched (not stretched, not summed), `d,e,f`
+stretched against the size-1 dims — at genuinely `O(χ̄)` cost, no hidden
+`χ̄²` intermediate. `Z` is then re-wrapped into a `TensorMap` (space
+assignment following the array's natural codomain-then-domain order,
+confirmed to match rather than assumed) and fed into a normal `@tensor`
+call with `a` as a spectator leg throughout.
+
+**Symmetry**: `apply!(...,Val(:src))` throws `ArgumentError` for any
+non-`Trivial` `sectortype` on either `H` or `ψ` — consistent with the
+rest of the package's current scope (see "Current scope" above), and
+also matches the paper's own stated limitation (§3.7): SRC's intermediate
+tensors have no block-sparsity structure and the algorithm doesn't
+attempt to preserve it, so it isn't symmetry-preserving even in
+principle without further design work (the paper explicitly flags this
+as future work, not something they solved).
+
 ## Benchmark suite (`benchmark/`)
 
 `PkgBenchmark`-based: `apply!` over a brickwork circuit trajectory
@@ -481,6 +537,113 @@ behavior — diminishing marginal cost as `maxdim` approaches a bond's true
 cap, and superlinear-looking scaling with `L` at large `maxdim` (more
 bonds in a longer chain can actually use the requested dimension) — not
 naive linear/polynomial scaling.
+
+### `alg=:src` added to the suite, plus a new `RandomApplyProblem`
+
+Both `circuit`/`hamiltonian` benchmarks above now sweep `alg ∈
+(:zipup,:src)` (`SUITE[...][name]["alg=$alg"]["maxdim=$χ"]`), letting
+`judge` compare the two algorithms directly rather than just each
+algorithm against its own history.
+
+Neither `circuit`/`hamiltonian` problem is actually a fair test of SRC's
+*claimed* advantage, though: both have small MPO bond dimension (`D≤4`
+for the brickwork gate layer, similarly small for TFIM's Sz-Sz+Sx-field
+MPO), and the paper is explicit that SRC's speed edge over
+contract-then-compress/density-matrix only materializes once `D,χ≫1`
+*and* the requested output `χ̄` represents genuine compression (`χ̄≪Dχ`) —
+neither condition holds here. A third problem, `RandomApplyProblem`
+(`benchmark/random_apply.jl`), was added specifically to test the claimed
+regime: a purely synthetic random MPO/MPS (not derived from any
+Hamiltonian), mirroring the paper's own Figure 1/§4.4.2 setup as closely
+as possible — `n=100` sites, `D=χ=50`, `d=2`, i.i.d. entries uniform on
+`[α,1]` with `α=-0.5` (the paper's own "intermediate difficulty" choice),
+sweeping requested `χ̄` from 5 to 100.
+
+Building and validating this problem surfaced three real, independent
+bugs — none in `apply!`/TensorKit themselves, all in how the synthetic
+benchmark data was constructed or compared:
+
+1. **`MPOTensor` domain leg order, confirmed the hard way.** Building a
+   random `MPOTensor` by hand (rather than via `_fsm_site_tensor` or
+   `_identity_mpo_tensor`, both of which already get this right) using
+   the domain order `(right,site_in)` — literally what an earlier draft
+   of this very file's prose said before being corrected (see "Core
+   types" above, "CHANGED from the original plan") — immediately threw
+   `SpaceMismatch` inside `apply!(...,Val(:zipup))`. Independent
+   confirmation, via a fresh mistake, that the corrected `(site_in,right)`
+   order documented above is the real one.
+2. **Correctness-check cost decoupled from benchmark-problem size.** The
+   blocking correctness checks originally ran against the actual
+   `CIRCUIT_PROBLEMS`/`HAMAPPLY_PROBLEMS` used for timing — meaning an
+   *exact* (untruncated) circuit trajectory at bond dimension `4^6=4096`,
+   doubled for every `alg`, doubled again by `judge` running target+
+   baseline. This alone accounted for 20+ minutes with zero visible
+   progress before being noticed. Fixed by adding small, dedicated
+   `*_CHECK_PROBLEMS` (tiny `L`/`n_steps`/`D`/`χ`) used only for
+   correctness, decoupled entirely from the sizes used for timing — the
+   class of bug being checked for (wrong leg convention, wrong FSM term,
+   wrong gate placement) is size-independent, so nothing is lost in
+   bug-catching power.
+3. **Unnormalized synthetic data causes genuine numerical pathology, not
+   just a slow correctness check.** `n=100` sequential contractions of
+   i.i.d.-random, *never normalized* tensors compound multiplicatively —
+   confirmed empirically: `norm(ψ0)≈1e123`, `norm(H)≈1e138` for the
+   paper-scale problem before any fix (the same phenomenon underlying the
+   multiplicative-ergodic/Oseledets theorem — one direction comes to
+   dominate exponentially in chain length for products of unnormalized
+   random factors). At that spread (100+ orders of magnitude), a
+   **relative** truncation criterion like `cutoff=1e-14` is not merely
+   imprecise but effectively meaningless: everything but the single
+   dominant direction genuinely falls below `1e-14` relative to the
+   largest singular value in double precision, so `:zipup` with
+   `cutoff=1e-14` collapsed to bond dimension 1 regardless of the
+   requested `maxdim` — reproducibly, and initially indistinguishable
+   from an actual truncation bug in `apply!` itself (ruled out by
+   checking `maxlinkdim` of the output directly — see below — before
+   concluding anything about `apply!`'s correctness). Fixed two ways,
+   addressing both symptom and root cause: `run_random_apply` truncates
+   `:zipup` by rank only (`cutoff=nothing`, `apply!`'s own idiom for "this
+   criterion is off," already used for `sweep_maxdim`/`sweep_cutoff`),
+   matching the paper's own protocol (Figure 1 always requests a target
+   bond dimension `χ̄`, never a tolerance); *and*
+   `build_random_mps_tensor`/`build_random_mpo_tensor` now normalize each
+   site tensor to unit Frobenius norm at construction, tackling the
+   multiplicative compounding at its source rather than only working
+   around its consequence. (A third, smaller fix in the same family: the
+   correctness check's `atol=1e-8` comparison was similarly meaningless
+   once the compared inner products aren't `O(1)` — switched to `rtol`.)
+
+A small utility was added to support diagnosing (2)/(3) directly rather
+than inferring truncation behavior from timing alone:
+```julia
+linkind(x::AbstractTensorTrain, pos::Int) = Tuple(domain(x[pos]))[end]
+linkinds(x::AbstractTensorTrain) = [linkind(x, i) for i in eachindex(x)]
+linkdims(x::AbstractTensorTrain) = dim.(linkinds(x))
+maxlinkdim(x::AbstractTensorTrain) = maximum(linkdims(x))
+```
+Generic over `AbstractTensorTrain` (covers both `MPS` and `MPO` with one
+definition) because "right" happens to be the **last** domain leg in
+both leg conventions — `MPS`'s domain is `(right,)` (trivially last) and
+`MPO`'s corrected domain is `(site_in,right)` (last of two, per the fix
+in "Core types" above). This is convenient but not enforced by the type
+system: a future `AbstractTensorTrain` subtype would need to preserve
+"right is last" for `linkind` to stay correct. `domain(x[pos])` doesn't
+support `Base.lastindex` (`ProductSpace` has no `lastindex` method,
+confirmed by a `MethodError` when first tried with `[end]` directly) —
+routed through `Tuple(...)` first, which does.
+
+**Result, once all three fixes above landed**: SRC's time advantage over
+`:zipup` on `random_apply_paper` grows monotonically with requested
+`maxdim` (from roughly at-par at `maxdim=5`, where SRC's fixed per-call
+overhead — array conversions for the batched-outer-product step above —
+dominates, to ~1.7× faster at `maxdim=100`), while `:zipup` itself now
+shows real `maxdim`-dependent scaling (previously flat/collapsed due to
+bug 3). Qualitatively matches the paper's own Figure 1 shape, though less
+dramatic (paper: ~3× at `χ̄=100`) — plausibly implementation/hardware
+differences, not investigated further. This is the first empirical
+confirmation that SRC's claimed regime (`D,χ≫1`, genuine compression)
+actually holds for this implementation, distinct from the earlier,
+inconclusive `circuit`/`hamiltonian` comparisons.
 
 ## Comparison against ITensor (`benchmark/compare_itensor.jl`)
 
@@ -555,6 +718,19 @@ charged-operator/symmetric-construction work above to land first.
    never actually executed — `orthogonalize!(H,1)` from a fresh MPO only
    triggers the right-sweep. `compress!`/`orthogonalize!!`/`compress!!`
    on `MPO` are also untested.
+9. **SRC symmetry-preservation** — not attempted; `apply!(...,Val(:src))`
+   throws for non-`Trivial` sectors rather than silently producing a
+   symmetry-violating result. Same underlying blocker as item 6 (charged
+   operators/states), plus SRC's own intermediate tensors having no
+   block-sparsity structure regardless — the paper itself (§3.7) flags
+   this as unsolved future work, not something with a known design yet.
+10. **`linkind`'s "right is always the last domain leg" assumption** —
+   holds for both `MPS` (`domain=(right,)`) and `MPO`
+   (`domain=(site_in,right)`) today, letting one generic
+   `AbstractTensorTrain` method cover both, but isn't enforced by the
+   type system — a future container type breaking this ordering would
+   silently return the wrong leg rather than erroring. Worth revisiting
+   if a third `AbstractTensorTrain` subtype is ever added.
 
 ## Roadmap (actual order, for reference)
 
@@ -567,11 +743,15 @@ charged-operator/symmetric-construction work above to land first.
 4. ~~`inner`/`norm`/`normalize`, zip-up `apply!`.~~ Done.
 5. ~~Benchmark suite + ITensor comparison.~~ Done — see "Benchmark suite"
    / "Comparison against ITensor" above.
-6. **DMRG3S** — not started. No direct MPSKit equivalent to lean on, per
-   the original notes; now also has a real `apply!`/`inner` foundation to
-   build the local update on top of.
-7. **SRC** — not started, no design work done, start from Camaño,
-   Epperly & Tropp 2025 Algorithm 1 as originally planned.
+6. ~~**SRC**~~ Done — see "`apply!`/`apply` (SRC — successive randomized
+   compression)" and "Benchmark suite" above. Confirmed empirically
+   faster than `:zipup` in its claimed regime (`D,χ≫1`, genuine
+   compression) via `RandomApplyProblem`; not symmetry-preserving,
+   consistent with current `Trivial`-only scope and the paper's own
+   stated limitation.
+7. **DMRG3S** — not started. No direct MPSKit equivalent to lean on, per
+   the original notes; now also has a real `apply!`/`inner` foundation
+   (both algorithms) to build the local update on top of.
 8. Open quantum systems extension — not started.
 9. Symmetric (`U1Irrep`/`SU2Irrep`) support across the board — blocked on
    the charged-operator/charged-state problem in "Current scope" above.

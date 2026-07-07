@@ -5,8 +5,9 @@
 **Status:** core functionality implemented, tested, and benchmarked
 (including a speed/memory comparison against ITensor) — `SiteType`/`op`/`state`
 dispatch, `MPS`/`MPO` containers, orthogonalization, compression,
-`OpSum`→`MPO` construction, `inner`/`norm`/`normalize`, and zip-up
-`apply!` (`H|ψ⟩`). **Currently restricted to `Trivial` (unsymmetrized)
+`OpSum`→`MPO` construction, `inner`/`norm`/`normalize`, and two `H|ψ⟩`
+algorithms (zip-up and SRC, see "Planned algorithms" below).
+**Currently restricted to `Trivial` (unsymmetrized)
 sites** — see "Current scope" below. See `design_notes.md` for the full
 implementation history, resolved design decisions, and open questions.
 
@@ -46,16 +47,30 @@ support and the next major piece of design work.
 - **Orthogonalization & compression**: `orthogonalize!`/`orthogonalize!!`/`orthogonalize`, `compress!`/`compress!!`/`compress` (ITensor-compatible `cutoff` semantics), for both `MPS` and `MPO`.
 - **Construction**: `random_mps`, product-state `MPS(sites, states)` (accepts `StateName`, `String`, or `Symbol` state labels), `sitetypes` (bulk `SiteType` construction).
 - **Hamiltonian construction**: `OpSum`/`add!`, FSM-based `MPO(::OpSum, sites)`.
-- **Expectation values & overlaps**: `inner(ψ,φ)`, `inner(ψ,H,φ)`, `norm`/`normalize`/`normalize!`/`normalize!!` (MPS, requires an orthogonality center).
-- **Operator application**: `apply!`/`apply` (zip-up algorithm for `H|ψ⟩`, following Paeckel et al. 2019 for default truncation parameters).
-- **Benchmarking**: a `PkgBenchmark`-based suite and a speed/memory comparison against ITensor (see below).
+- **Expectation values & overlaps**: `inner(ψ,φ)`, `inner(ψ,H,φ)`, `norm`/`normalize`/`normalize!`/`normalize!!` (MPS, requires an orthogonality center), `maxlinkdim`/`linkdims`/`linkinds`/`linkind` (bond-dimension introspection, generic over `AbstractTensorTrain`).
+- **Operator application**: `apply!`/`apply` for `H|ψ⟩`, two algorithms — zip-up (`alg=:zipup`, following Paeckel et al. 2019 for default truncation parameters) and SRC (`alg=:src`, Successive Randomized Compression, Camaño, Epperly & Tropp 2025); `Trivial`-sector only for both, `:src` additionally has no `cutoff` (rank-only truncation, matching the paper's own methodology).
+- **Benchmarking**: a `PkgBenchmark`-based suite (comparing `:zipup` vs. `:src` directly) and a speed/memory comparison against ITensor (see below).
 
 ## Benchmarking
 
 A `PkgBenchmark` suite in `benchmark/` covers `apply!` over a brickwork
-circuit trajectory and over single Hamiltonian application. Run via
-`julia benchmark/run_and_export.jl`; results are written as timestamped
-markdown to `benchmark/results/`.
+circuit trajectory, over single Hamiltonian application, and over a
+synthetic random MPO/MPS problem (mirroring Camaño, Epperly & Tropp
+2025's own Figure 1 setup — large, controllable `D`/`χ`, specifically to
+test the regime where SRC's asymptotic advantage is claimed to show up,
+which neither of the other two problems reaches). All three sweep both
+`alg=:zipup` and `alg=:src`. Run via `julia benchmark/run_and_export.jl`;
+results are written as timestamped markdown to `benchmark/results/`.
+`benchmark/compare_git.jl` compares two git refs directly via
+`PkgBenchmark.judge`.
+
+On the random-tensor problem (`n=100`, `D=χ=50`), SRC's time advantage
+over zip-up grows with the requested output bond dimension — roughly at
+par at `maxdim=5`, ~1.7× faster at `maxdim=100` — qualitatively matching
+the paper's own reported scaling. See `design_notes.md`'s "Benchmark
+suite" section for the numerical pitfalls this uncovered (unnormalized
+synthetic data causing genuine, non-bug bond-dimension collapse under a
+relative truncation cutoff) before this comparison became meaningful.
 
 `benchmark/compare_itensor.jl` compares against ITensor on the same
 circuit benchmark (`Trivial` sites, single-threaded, controlled BLAS/
@@ -71,9 +86,9 @@ advantage once that support lands.
 
 Ported from an existing dense (non-symmetric) prototype library, roughly in order of expected difficulty on this new backend:
 
-1. ~~**Zip-up** MPO–MPS contraction — single-pass, sequential.~~ Implemented as `apply!`.
-2. **DMRG3S** (Hubig, McCulloch, Schollwöck, Wolf 2015, arXiv:1501.05504) — strictly single-site DMRG with subspace expansion. Not yet started; MPSKit's closest analog (`changebonds` with `OptimalExpand`) is a separate step, not fused into the local update the way DMRG3S needs.
-3. **SRC** (Successive Randomized Compression; Camaño, Epperly & Tropp 2025, arXiv:2504.06475) — not yet designed even in the prototype library; needs first-principles design work from the paper before porting.
+1. ~~**Zip-up** MPO–MPS contraction — single-pass, sequential.~~ Implemented as `apply!(...,Val(:zipup))`.
+2. ~~**SRC** (Successive Randomized Compression; Camaño, Epperly & Tropp 2025, arXiv:2504.06475).~~ Implemented as `apply!(...,Val(:src))` and benchmarked directly against zip-up (see "Benchmarking" above); not symmetry-preserving, consistent with current `Trivial`-only scope and the paper's own stated limitation (§3.7).
+3. **DMRG3S** (Hubig, McCulloch, Schollwöck, Wolf 2015, arXiv:1501.05504) — strictly single-site DMRG with subspace expansion. Not yet started; MPSKit's closest analog (`changebonds` with `OptimalExpand`) is a separate step, not fused into the local update the way DMRG3S needs. Listed here out of the original expected-difficulty order — SRC (above) turned out to be tractable sooner — and now has a real `apply!`/`inner` foundation (both algorithms) to build the local update on top of.
 
 ## Longer-term direction
 
@@ -99,6 +114,50 @@ Not yet registered.
 - [ITensor / ITensorMPS.jl](https://itensor.org) — the ergonomics/finite-system reference point
 - [MPSKit.jl](https://github.com/QuantumKitHub/MPSKit.jl) — the symmetric-backend reference point (VUMPS-first design)
 - [TensorMixedStates.jl](https://itensor.org/codes/) — open-quantum-system MPS on ITensor, worth revisiting once OQS work begins
+
+## AI usage transparency
+
+**Design direction, priorities, and final decisions belong to the
+project's maintainer(s).** Claude (Anthropic's AI assistant) has been
+used throughout this project's development, across many separate
+sessions, but its role has been that of an interactive
+collaborator/pair-programmer executing under the maintainer's direction —
+not an independent author. Every design decision recorded in
+`design_notes.md` reflects a choice the maintainer made and directed,
+even where Claude helped draft the reasoning or the code that followed
+from it.
+
+Concretely, within that relationship, Claude's contributions have included:
+
+- drafting implementations of core types and algorithms, iterated on
+  interactively rather than generated once and accepted as-is;
+- debugging real, specific failures — e.g. tracing a `SpaceMismatch`
+  error back to an incorrect leg-convention assumption, or diagnosing a
+  randomized-compression benchmark anomaly (a bond dimension silently
+  collapsing to 1) down to floating-point behavior under a relative
+  truncation cutoff applied to unnormalized synthetic data;
+- writing and maintaining this README and `design_notes.md`, the latter
+  specifically designed to capture *empirical* reasoning (confirmed
+  behavior, resolved bugs, syntax gotchas) rather than just decisions;
+- reviewing and optimizing performance-sensitive code, such as the SRC
+  algorithm's prepass step.
+
+A few things worth being explicit about:
+
+- **Claude has no memory between sessions** unless prior context is
+  explicitly re-supplied. This project's history spans many disconnected
+  conversations, so this note describes the general *nature* of the
+  collaboration rather than an exhaustive log of who-decided-what-when —
+  `design_notes.md`'s own convention (one commit per resolved design
+  decision, with rationale in the message, per "Repository / workflow
+  conventions" there) is the closest thing to that detailed record, and
+  reflects the maintainer's decisions at each step, not Claude's.
+- Claims phrased as "confirmed empirically" or "confirmed via a real
+  session" throughout `design_notes.md` reflect actual code that was
+  actually run and checked, not just a plausible-sounding assertion —
+  Claude proposes, implements, and explains; an actual execution whose
+  output gets inspected (by the maintainer, or within a session via a
+  real `bash`/Julia run) is what turns a claim into a confirmed one.
 
 ## Contributing / status
 
