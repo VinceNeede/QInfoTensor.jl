@@ -29,6 +29,7 @@ export op, state, optensor, statetensor
 export MPSTensor, MPOTensor
 export AbstractTensorTrain, MPS, MPO, random_mps
 export tensors, llim, rlim, isortho, orthocenter, set_ortho_lims!
+export linkind, linkinds, linkdims, maxlinkdim, reset_ortho_lims!
 export orthogonalize, orthogonalize!, orthogonalize!!, compress, compress!, compress!!
 export inner, norm, normalize, normalize!, normalize!!
 export OpTerm, OpSum, add!
