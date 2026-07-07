@@ -371,13 +371,13 @@ function _densitymatrix_envs(H::MPO, ψ::MPS)
     ψ_1 = removeunit(ψ[1], Val(1))
 
     @tensoropt E[1][rh', r'; rh, r] :=
-        H_1[s; s1 rh] * ψ_1[s1; r] * conj(H_1[s; s2 rh']) * conj(ψ_1[s2; r'])
+        ψ_1[s1; r] * H_1[s; s1 rh] * conj(H_1[s; s2 rh']) * conj(ψ_1[s2; r'])
 
     for i in 2:(L - 1)
         H_i, ψ_i = H[i], ψ[i]
         E_im = E[i - 1]
-        @tensoropt E[i][rh', r'; rh, r] :=
-            E_im[lh', l'; lh, l] * H_i[lh, s; s1, rh] * ψ_i[l, s1; r] *
+        @tensoropt (l, l', r, r') E[i][rh', r'; rh, r] :=
+            E_im[lh', l'; lh, l] * ψ_i[l, s1; r] * H_i[lh, s; s1, rh] *
             conj(H_i[lh', s; s2, rh']) * conj(ψ_i[l', s2; r'])
     end
     return E
