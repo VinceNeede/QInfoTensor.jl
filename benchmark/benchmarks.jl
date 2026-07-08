@@ -133,3 +133,4 @@ end
 const SUITE = BenchmarkGroup()
 
 include(joinpath(@__DIR__, "suites", "apply.jl"))
+include(joinpath(@__DIR__, "suites", "dmrg.jl"))

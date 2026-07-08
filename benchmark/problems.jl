@@ -18,7 +18,7 @@ struct HamiltonianSpec
 end
 
 function _tfim_opsum(L::Int; J::Real=1.0, h::Real=1.0, periodic::Bool)
-    os = OpSum()
+    os = QInfoTensor.OpSum()
     range_ = periodic ? (1:L) : (1:L-1)
     for i in range_
         j = periodic ? mod1(i + 1, L) : i + 1
@@ -147,4 +147,48 @@ function run_hamapply(H, ψ0; alg::Symbol=:zipup, maxdim::Int, cutoff::Real)
     else
         return apply(H, ψ0; alg, maxdim, cutoff)
     end
+end
+
+# ------------------------------------------------------------------------
+# DMRGProblem: optimize a Hamiltonian MPO using dmrg! over a specified
+# number of sweeps, swept across a target maxdim scale.
+# ------------------------------------------------------------------------
+
+struct DMRGProblem
+    name::String
+    hamiltonian::HamiltonianSpec
+    nsweeps::Int                 # number of sweeps per benchmark trial
+    maxdim_values::Vector{Int}   # swept maxdim values for scaling analysis
+    cutoff::Float64
+end
+
+const _DMRG_MAXDIM_VALUES = [10, 20, 40, 80]
+const _DMRG_CUTOFF = 1e-12
+const _DMRG_NSWEEPS = 10  # 2 sweeps ensures a complete forward + backward round-trip
+
+const dmrg_tfim_L20_open = DMRGProblem(
+    "dmrg_tfim_L20_open", tfim_L20_open, _DMRG_NSWEEPS, _DMRG_MAXDIM_VALUES, _DMRG_CUTOFF,
+)
+
+const dmrg_tfim_L20_periodic = DMRGProblem(
+    "dmrg_tfim_L20_periodic", tfim_L20_periodic, _DMRG_NSWEEPS, _DMRG_MAXDIM_VALUES, _DMRG_CUTOFF,
+)
+
+const DMRG_PROBLEMS = (dmrg_tfim_L20_open, dmrg_tfim_L20_periodic)
+
+"""
+    build_dmrg_inputs(problem::DMRGProblem) -> (sites, H, ψ0)
+
+Build `sites`, the left-canonicalized Hamiltonian `MPO`, and a low bond-dimension
+random `MPS` to seed the optimization network. Not part of the timed benchmark.
+"""
+function build_dmrg_inputs(problem::DMRGProblem)
+    sites = problem.hamiltonian.build_sites()
+    H = QInfoTensor.MPO(problem.hamiltonian.build_opsum(), sites)
+    QInfoTensor.orthogonalize!(H, 1)
+    
+    # Seed with bond dimension 2 to evaluate structural scaling growth profile
+    ψ0 = QInfoTensor.random_mps(sites, 2)
+    QInfoTensor.orthogonalize!(ψ0, 1)
+    return sites, H, ψ0
 end
