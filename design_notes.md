@@ -9,12 +9,13 @@ kept up to date the same way, alongside the code it documents.
 
 **Status update**: core types, `SiteType`/`op`/`state`, MPS/MPO
 containers, orthogonalization, compression, `OpSum`→MPO construction,
-`inner`/`norm`/`normalize`, and all three `apply!` algorithms (zip-up,
-SRC, density matrix), a benchmark suite (comparing all three directly,
-including a synthetic random-tensor problem specifically targeting SRC's
-claimed regime), and a comparison against ITensor (both `:zipup` and
-`:densitymatrix`) are all implemented and tested (`Trivial` sites only —
-see "Current scope" below). This file has
+`inner`/`norm`/`normalize`, all three `apply!` algorithms (zip-up,
+SRC, density matrix), `dmrg!` (`:twosite` and `:dmrg3s`/nsite=1), a
+benchmark suite (comparing all `apply!` algorithms directly, including a
+synthetic random-tensor problem specifically targeting SRC's claimed
+regime), and comparisons against ITensor (`apply!`'s `:zipup`/
+`:densitymatrix`, and now `dmrg!`'s `:twosite`) are all implemented and
+tested (`Trivial` sites only — see "Current scope" below). This file has
 been rewritten to reflect the actual, tested implementation rather than
 the original pre-implementation plan; see git history for the original
 version if the historical reasoning is needed.
@@ -801,9 +802,10 @@ inconclusive `circuit`/`hamiltonian` comparisons.
 
 Standalone script, not part of the `PkgBenchmark` `SUITE` (ITensor doesn't
 change across QInfoTensor commits, so `judge`/`compare` isn't the right
-mechanism). Ported from an earlier prototype-vs-ITensor comparison; the
-DMRG section was dropped entirely (no DMRG here yet), keeping only the
-circuit/`apply` comparison. `verify_circuit_equivalence.jl` checks
+mechanism). Originally ported from an earlier prototype-vs-ITensor
+comparison with the DMRG section dropped (no DMRG existed yet at the
+time); DMRG comparison (`:twosite` vs `ITensorMPS.dmrg`) has since been
+added back — see "`dmrg!`" below for those results. `verify_circuit_equivalence.jl` checks
 physical correctness first (dense-vector overlap, small `L`) — same fixed
 gate, same brickwork circuit, both libraries — before trusting any timing
 comparison.
@@ -837,6 +839,242 @@ Caveat: this is `Trivial` sites only. The real, defensible case for
 eventually beating ITensor is non-abelian (`SU2Irrep`) symmetry
 exploitation, which ITensor doesn't support natively — that needs the
 charged-operator/symmetric-construction work above to land first.
+
+## `dmrg!` — `ProjMPO`, `:twosite`, and `:dmrg3s` (nsite=1)
+
+New runtime dependency: **`KrylovKit.jl`**, for the local eigensolve.
+Confirmed rather than assumed before relying on it: `TensorMap`
+implements the full `VectorInterface.jl` interface (`TensorKit`'s own
+docs state this explicitly, and it reexports `zerovector`/`scale`/`add`/
+`inner`/`norm` accordingly), and `KrylovKit.eigsolve` explicitly accepts
+any `VectorInterface`-compliant type, not just `AbstractVector` — so
+`eigsolve` takes an `MPSTensor`/merged two-site `TensorMap` directly, no
+vec/reshape/`_align` dance like the dense prototype needed. `ITensorMPS`'s
+own `dmrg` already uses `KrylovKit.eigsolve` internally the same way, so
+this isn't a novel pattern for this problem class.
+
+### `ProjMPO` — windowed effective-Hamiltonian cache
+
+`ProjMPO{T,N}` (`N∈{1,2}` is `nsite`) caches left/right environments in a
+single `Vector`, tracked via `lpos`/`rpos` — direct port of the
+prototype's windowed design, extended to a shared `_env(P,ψ,boundarypos,
+::Val{:left}/:right)` helper (fetches the cached environment or falls
+back to the trivial boundary seed uniformly) used by both `heff` and the
+`:dmrg3s` perturbation machinery, rather than repeating the
+seed-or-cached ternary at every call site.
+
+**Environment tensor (`EnvTensor{T,S,A} = TensorMap{T,S,1,2,A}`)**:
+codomain=(bra_bond,), domain=(mpo_bond,ket_bond) — this is the *same*
+object `inner(ψ,H,φ)` already builds internally (bra==ket==ψ here, since
+DMRG wants `⟨ψ|H_eff|ψ⟩`-shaped environments). The split, and the
+`_extend_env`/`_seed_env` contractions built from it, were lifted
+directly from `inner`'s real, working source rather than re-derived —
+the one genuine *new* derivation was the right-moving mirror
+(`_extend_env`/`_seed_env`, `Val(:right)`), since `inner` only ever
+sweeps left-to-right into a scalar and has no precedent for a
+right-moving environment. That mirror was flagged unverified for several
+sessions; **now indirectly confirmed** via the `nsite=1` vs `nsite=2`
+energy agreement at `L=20` (see "Empirical validation" below) — a direct
+Hermiticity check (`‖E-E'‖/‖E‖`) on the standalone right-environment was
+never separately run, but the end-to-end numerical agreement across many
+sweeps and both boundary conditions is strong indirect evidence, and
+that's no longer treated as an open risk.
+
+Boundary seeding: `TensorMap(ones(T,1,1), V_left ← (V_mpo_left ⊗
+V_ket_left))` — confirmed current TensorKit idiom (checked against docs:
+`TensorMap(::typeof(ones), ::HomSpace)` is *deprecated*; direct
+`ones(T, HomSpace)` construction is the reexported-from-Base form the
+docs actually recommend). No edge-case branching needed inside the sweep
+loop itself: the seed is fed through the *same* `_extend_env` call as
+every other site, not treated as `P.env[1]` directly (an early draft bug
+— see below).
+
+### `heff` — effective Hamiltonian application
+
+`heff(P,pos,ψ,ϕ)` returns a tensor in the *same* space as `ϕ`, required
+for `eigsolve` to see a well-defined linear map — confirmed no `_align`
+step is needed (writing output labels to literally match `ϕ`'s own is
+sufficient). Boundary cases (`pos∈{1,L}`) reuse `_env`'s seed fallback
+uniformly rather than hand-written special contractions — an earlier
+draft's hand-written boundary cases had `Hi`'s own left/right leg
+dropped/misassigned; the uniform-seed rewrite fixed this as a side
+effect of being simpler, not by a separate targeted fix.
+
+### `:twosite`
+
+Straightforward once `ProjMPO`/`heff` exist: merge `ψ[pos]⊗ψ[pos+1]` into
+a `TwoSiteTensor{T,S,A}=TensorMap{T,S,3,1,A}` (codomain=(l,s1,s2),
+domain=(r,) — same "everything but right in codomain" convention
+`MPSTensor` uses, one extra physical leg), eigensolve via `heff`, then
+`svd_trunc` (TensorKit's factorization interface moved to
+`MatrixAlgebraKit`; `tsvd` is deprecated) split at the site1/site2 bond.
+`permute(phi2,((1,2),(3,4)))` is required before `svd_trunc` (no
+leftinds/rightinds argument like the old `tsvd`), and `Vh` needs a
+second, shape-fixing `permute` afterward to become a legal `MPSTensor`
+again (`(bond,)←(s2,r)` → `(bond,s2)←(r,)`) — this crosses `s2` across
+the codomain/domain boundary twice, in opposite directions, which cancels
+the unwanted dual exactly (same principle validated for
+`orthogonalize!`'s right-step), so no separate `flip` is needed unlike
+the density-matrix write-back's single-crossing case. `S` must be
+absorbed into `Vh` *before* this shape-fixing repartition, not after —
+once `Vh`'s codomain becomes the composite `(bond,s2)`, it no longer
+matches `S`'s plain `(bond,)` domain for `*` to compose.
+
+**Confirmed working end-to-end**, including at real scale — see
+"Empirical validation" below.
+
+### `:dmrg3s` (nsite=1) — subspace expansion
+
+The harder piece, and where a real structural asymmetry shows up:
+`phys` always lives in `ϕ`'s codomain (with `left`, per the
+`(left,phys)→right` convention), so growing the **right** bond (forward
+sweep, using `EL`) puts the extra leg and `phys` on opposite sides "for
+free," while growing the **left** bond (backward sweep, using `ER`)
+puts them on the *same* side — a genuinely different derivation, not a
+relabeling. Consequences:
+
+- `_dmrg3s_perturbation(P,ψ,pos,ϕ,::Val{:left})` — close cousin of
+  `heff`'s own confirmed contraction; no leg crosses the codomain/domain
+  boundary at all.
+- `_dmrg3s_perturbation(P,ψ,pos,ϕ,::Val{:right})` — genuine new
+  derivation; deliberately places `phys` in the domain as an
+  intermediate, non-`MPSTensor`-legal shape, corrected in
+  `_dmrg3s_noise`'s `Val(:right)` method via a second, canceling
+  crossing (same "bend out, bend back in cancels" principle as
+  `:twosite`'s `Vh` fix and `orthogonalize!`'s right-step).
+- `_expansion_injectors(T,V1,Vpert)` factors the shared
+  `fuse`/`⊕`/`isometry`/`isomorphism` construction (fuse the
+  perturbation's extra legs into one new space, direct-sum against the
+  existing bond, return the injections) used by both directions.
+- `_dmrg3s_residual(::Val{:left}/:right, ...)` restricts the SVD
+  remainder back onto the neighbor's *old* (pre-expansion) bond size via
+  the same `inj1` used to build the expansion, composed *before* ever
+  touching the neighboring site tensor — equivalent to lifting the
+  neighbor into the enlarged space first and contracting the full
+  remainder against it, by associativity, but cheaper (never
+  materializes an enlarged copy of the neighbor).
+
+Both `_update_local_tensors!` branches unify the boundary/direction
+bookkeeping via `Val{:left}/:right` dispatch (matching `_seed_env`/
+`_extend_env`'s existing convention) rather than a scattering of
+`_right`-suffixed twin functions — the *sequence* of operations still
+genuinely differs between directions (backward needs an extra `permute`
+before `svd_trunc` that forward doesn't), so the outer `if forward`
+branch stays, but nothing inside it repeats logic that the `Val`-based
+layer already shares.
+
+**`llim`/`rlim` bug, caught by direct inspection, not a numerical
+failure**: single-site forward/backward updates were initially set to
+`(pos,pos+1)`/`(pos-1,pos)` — off by one. Since the new orthogonality
+center is the *neighbor* absorbing the SVD remainder (`pos+1` forward,
+`pos-1` backward), matching `:twosite`'s own `(pos,pos+2)`/
+`(pos-1,pos+1)` convention (just shifted by one site, since nsite=1
+processes one site instead of two) gives the correct
+`(pos,pos+2)`/`(pos-2,pos)`.
+
+### Tolerance and noise schedules
+
+The prototype's adaptive `eigsolve` tolerance ratchet (tying `tol` to the
+*previous sweep's SVD truncation error*) was **deliberately not ported**:
+it conflates two different quantities (truncation error measures
+discarded Schmidt weight; `eigsolve`'s own convergence has no derived
+relationship to that) and `tol_power=0.5` had no derivation behind it —
+a plausible-looking knob, not a bound. Replaced with plain, explicit
+per-sweep schedules instead, matching `ITensorMPS.dmrg`'s own reference
+choice of exposing `eigsolve_tol` directly rather than deriving it:
+
+- `_default_eigsolve_tol(F,nsweeps)` — geometric schedule (default: one
+  decade tighter per sweep from `1e-6`), floored at `10*eps(F)` so it
+  never asks for more precision than the scalar type `F` can represent —
+  `F32`/`F64` genuinely diverge here (the floor differs by ~8 orders of
+  magnitude), which a single hardcoded value (the prototype's `1e-12`,
+  already tighter than `Float32` can resolve at all) cannot express.
+  `F` is recovered from `ProjMPO`'s own cached `EnvTensor` scalar type
+  parameter, not looked up separately on `ψ`/`H`.
+- `_default_noise(nsweeps)` — geometric decay, then **exactly `nothing`**
+  (not `0.0`) for the last `zero_tail=2` sweeps. This distinction is
+  load-bearing, not stylistic: `_update_local_tensors!` only skips the
+  whole perturbation/fuse/⊕/inject path via `!isnothing(noise)` — a
+  literal `0.0` would still run all of it, growing the bond with
+  exactly-zero-weight directions and relying on `svd_trunc` to discard
+  them after the fact, which is both wasteful and not the same code path
+  as "no expansion." Matches the standard advice to disable noise
+  entirely for final sweeps (any nonzero mixing biases the state away
+  from the true single-site variational optimum), not merely shrink it
+  toward zero.
+- The default is wired in as a plain keyword-default *expression*
+  (`noise=_default_noise(nsweeps)` in the signature itself, evaluated at
+  call time using the already-bound `nsweeps` parameter) rather than a
+  sentinel scheme (`missing`-vs-`nothing`) — an explicit `noise=nothing`
+  from a caller always overrides the default expression cleanly, so
+  there was never actually a disambiguation problem between "unspecified"
+  and "explicitly off" to solve.
+- `nsite=2`'s `dmrg!` method has no `noise` keyword at all (and no
+  `kwargs...` catch-all) — passing it is a structural `MethodError`, not
+  a silently-ignored no-op, matching the "no fallback, must error" bar
+  `test_sitetype.jl` already applies to illegal `SiteType`/`op`
+  combinations (confirmed via a dedicated test).
+
+### Empirical validation
+
+Two independent references, at two different scales:
+
+1. **`test/test_dmrg.jl`** (`L=6` TFIM, exact diagonalization via plain
+   dense Kronecker construction — no QInfoTensor.jl involved, so it can't
+   share a bug with the code under test). Staged by risk: no-noise
+   plumbing (both sweep directions, no expansion machinery at all)  →
+   forward-first with noise (`EL`-based expansion) → backward-first with
+   noise (`ER`-based expansion, the highest-risk stage) → `:dmrg3s` vs
+   `:twosite` cross-check. All pass. Also includes a structural test that
+   `nsite=2`+`noise` raises `MethodError`.
+2. **`benchmark/compare_itensor.jl`** (`:twosite` vs `ITensorMPS.dmrg`,
+   `L=20` TFIM, open and periodic): energies match to 6 decimal places
+   *and* the converged bond dimension matches exactly, across every
+   swept `maxdim`, both boundary conditions — a materially stronger
+   correctness signal than the `L=6` ED check alone, since `L=20` is
+   where larger bond dimension / more sweeps-to-converge / (for
+   `:dmrg3s`) many more backward-branch invocations could plausibly
+   expose something `L=6` doesn't.
+3. **`benchmark/verify_dmrg3s.jl`** (new, deliberately *not* part of
+   `SUITE`/`@benchmarkable` — there's no natural way to assert on a
+   return value there, and the tiny `*_CHECK_PROBLEMS`-at-`L=6` pattern
+   used for `apply!`'s own correctness checks doesn't transfer here,
+   since the whole concern was `:dmrg3s`'s backward branch misbehaving
+   only at a scale the `L=6` check doesn't stress): `nsite=1` (default
+   noise schedule, exercised here for the first time outside the `L=6`
+   tests) vs `nsite=2`, at the real `benchmark/problems.jl`
+   `DMRG_PROBLEMS` scale (`L=20`). Confirmed passing: `dmrg_tfim_L20_open`
+   agrees to `|ΔE|≈6×10⁻¹⁰` across all four `maxdim` values;
+   `dmrg_tfim_L20_periodic` agrees to `|ΔE|≈6×10⁻⁸`–`1.4×10⁻⁷` (looser,
+   as expected — periodic boundary conditions need a larger bond
+   dimension to represent the same state, so there's more room for the
+   two algorithms' independent truncation choices to differ slightly
+   before both converge). This is what turned the right-environment
+   mirror's status from "unverified" to "indirectly confirmed" above.
+
+**Performance** (`compare_itensor.jl`, `:twosite` vs ITensor, `L=20`
+TFIM): 1.4×–2.15× faster, consistently lower memory. Open boundary
+conditions reproduce the same qualitative pattern already documented for
+`apply!`'s `:zipup` (largest speedup at small `maxdim`, shrinking as it
+grows — fixed per-call overhead dominates small tensors, converging as
+BLAS/LAPACK cost dominates at large `χ`). Periodic boundary conditions
+dip then recover (1.71×→1.45×→1.46×→1.69×) rather than monotonically
+shrinking — traced to the *actual* converged bond dimension saturating
+around `maxdim=20` regardless of how much higher `maxdim` is requested
+(the periodic `dim` column reads 10/20/21/21), meaning `maxdim=40/80`
+aren't exercising bigger tensors than `maxdim=20` here, not a real
+anomaly in the comparison itself.
+
+`nsite=1` vs `nsite=2` (own-implementation comparison, same `L=20`
+problems, no ITensor involved): `nsite=1` is both faster (~330ms vs
+~415ms open BC; ~415-441ms vs ~638-820ms periodic BC) and lower memory
+(flat 166.79 MiB vs 242.13 MiB open BC), consistent with the original
+motivation for DMRG3S cited in the README (Hubig et al. 2015): a
+single-site update never forms the larger merged two-site tensor at all.
+This comparison's timing was gathered *before* `verify_dmrg3s.jl`
+existed to confirm the two algorithms agree numerically at this scale —
+worth being aware the speed numbers predate the correctness check if
+reproducing historically, though both are now independently confirmed.
 
 ## Open questions (updated)
 
@@ -899,6 +1137,27 @@ charged-operator/symmetric-construction work above to land first.
    since fixed per-operation bookkeeping overhead should be a bigger
    fraction of a smaller, less FLOP-dominated total. Cheap to check,
    just not yet run.
+13. **Right-moving environment (`_seed_env`/`_extend_env`,
+   `Val(:right)`) has no *direct* Hermiticity check** — only indirect
+   confirmation via `:dmrg3s`'s correct end-to-end energies at `L=6` and
+   `L=20` (see "`dmrg!`" above). A standalone `‖E-E'‖/‖E‖` check on a toy
+   right-moving environment, the same test already used to validate
+   `_densitymatrix_envs`'s `E`, would close this out properly, but isn't
+   currently judged worth the effort given the numerical agreement
+   already obtained.
+14. **`:dmrg3s`'s default noise schedule (`_default_noise`) has a single
+   hardcoded shape** (`start=1e-2`, one decade per sweep, `zero_tail=2`)
+   — reasonable given `verify_dmrg3s.jl`'s results, but not tuned or
+   compared against alternatives (e.g. a slower ramp, a different
+   `zero_tail`). Revisit if a harder problem (larger `D`/`χ`, or a
+   Hamiltonian with a smaller gap) doesn't converge as cleanly as TFIM
+   does here.
+15. **MPO's own `llim`/`rlim` semantics under `:dmrg3s`/`:twosite`** —
+   `ProjMPO`/`heff` only ever read `H`'s tensors positionally (`P.H[pos]`
+   etc.), never its `llim`/`rlim` bookkeeping, so the existing open
+   question about what MPO orthogonality limits mean under `zip-up`
+   (item 7 above) remains exactly as open as before — `dmrg!` neither
+   resolves nor depends on it.
 
 ## Roadmap (actual order, for reference)
 
@@ -929,9 +1188,20 @@ charged-operator/symmetric-construction work above to land first.
    pass required), and currently still slower than ITensor's own
    implementation of the same algorithm (~3-9% at `maxdim=320`), pending
    the upstream fix.
-7. **DMRG3S** — not started. No direct MPSKit equivalent to lean on, per
-   the original notes; now also has a real `apply!`/`inner` foundation
-   (both algorithms) to build the local update on top of.
+7. ~~**DMRG3S**~~ Done — see "`dmrg!` — `ProjMPO`, `:twosite`, and
+   `:dmrg3s` (nsite=1)" above. Both `:twosite` and `:dmrg3s` implemented,
+   sharing a windowed `ProjMPO` effective-Hamiltonian cache and a new
+   `KrylovKit.jl` dependency for the local eigensolve. Confirmed against
+   exact diagonalization (`L=6`), against `ITensorMPS.dmrg` (`:twosite`,
+   `L=20`, energies and converged bond dimension both matching exactly),
+   and against each other (`:dmrg3s` vs `:twosite`, `L=20`,
+   `verify_dmrg3s.jl`) — the last of these is what confirmed the
+   right-moving environment mirror (open since the density-matrix work)
+   is correct in practice, without a direct Hermiticity check ever being
+   run on it standalone. `:dmrg3s` is faster and lower-memory than
+   `:twosite` at `L=20`, consistent with the original motivation for
+   choosing it (Hubig et al. 2015): never forming the larger merged
+   two-site tensor.
 8. Open quantum systems extension — not started.
 9. Symmetric (`U1Irrep`/`SU2Irrep`) support across the board — blocked on
    the charged-operator/charged-state problem in "Current scope" above.

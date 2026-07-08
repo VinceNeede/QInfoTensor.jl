@@ -5,9 +5,11 @@
 **Status:** core functionality implemented, tested, and benchmarked
 (including a speed/memory comparison against ITensor) — `SiteType`/`op`/`state`
 dispatch, `MPS`/`MPO` containers, orthogonalization, compression,
-`OpSum`→`MPO` construction, `inner`/`norm`/`normalize`, and three `H|ψ⟩`
+`OpSum`→`MPO` construction, `inner`/`norm`/`normalize`, three `H|ψ⟩`
 algorithms (zip-up, SRC, and density matrix — see "MPO-MPS contraction:
-choosing an algorithm" below for when to use each).
+choosing an algorithm" below for when to use each), and `dmrg!` (two-site
+and single-site-with-subspace-expansion — see "DMRG: choosing an
+algorithm" below).
 **Currently restricted to `Trivial` (unsymmetrized)
 sites** — see "Current scope" below. See `design_notes.md` for the full
 implementation history, resolved design decisions, and open questions.
@@ -50,7 +52,8 @@ support and the next major piece of design work.
 - **Hamiltonian construction**: `OpSum`/`add!`, FSM-based `MPO(::OpSum, sites)`.
 - **Expectation values & overlaps**: `inner(ψ,φ)`, `inner(ψ,H,φ)`, `norm`/`normalize`/`normalize!`/`normalize!!` (MPS, requires an orthogonality center), `maxlinkdim`/`linkdims`/`linkinds`/`linkind` (bond-dimension introspection, generic over `AbstractTensorTrain`).
 - **Operator application**: `apply!`/`apply` for `H|ψ⟩`, three algorithms — zip-up (`alg=:zipup`, following Paeckel et al. 2019 for default truncation parameters), SRC (`alg=:src`, Successive Randomized Compression, Camaño, Epperly & Tropp 2025), and density matrix (`alg=:densitymatrix`, ported from ITensor's own implementation); `Trivial`-sector only for all three, `:src` additionally has no `cutoff` (rank-only truncation, matching the paper's own methodology). See "MPO-MPS contraction: choosing an algorithm" below for when to use each.
-- **Benchmarking**: a `PkgBenchmark`-based suite (comparing `:zipup` vs. `:src` directly) and a speed/memory comparison against ITensor (see below).
+- **Ground-state search**: `dmrg!` for variational ground-state optimization, two algorithms — two-site (`nsite=2`) and single-site with subspace expansion (`nsite=1`, DMRG3S/Hubig et al. 2015); `Trivial`-sector only for both. See "DMRG: choosing an algorithm" below for when to use each.
+- **Benchmarking**: a `PkgBenchmark`-based suite (comparing `:zipup` vs. `:src` directly, and `dmrg!`'s two algorithms against each other) and a speed/memory comparison against ITensor, for both `apply!` and `dmrg!` (see below).
 
 ## MPO-MPS contraction: choosing an algorithm
 
@@ -91,6 +94,35 @@ elsewhere in the literature. Reach for this when you specifically need
 the best achievable truncation and can afford the extra time, not as a
 default.
 
+## DMRG: choosing an algorithm
+
+`dmrg!(ψ, H, nsweeps; nsite, maxdim, cutoff, noise, eigsolve_tol)`
+implements ground-state search two ways.
+
+| | `nsite=2` (two-site) | `nsite=1` (`:dmrg3s`) |
+|---|---|---|
+| **Speed / memory** | Slower, higher memory — forms the merged two-site tensor every step | Faster, lower memory at `L=20` in practice — never forms it |
+| **Bond growth** | Automatic, via `svd_trunc` at every step | Only via subspace expansion (`noise`) — with `noise=nothing`, bond dimension can never grow past whatever `ψ` started with |
+| **Maturity** | More validated (this project's own `L=20`-vs-ITensor comparison) | Newer; validated against `nsite=2` and exact diagonalization, but with less independent track record |
+| **`noise`** | Not accepted — passing it raises `MethodError` | Required for bond growth; has a sensible default schedule (geometric decay, then off for the final sweeps) if not passed |
+
+**Two-site — the more battle-tested default.** Matches
+`ITensorMPS.dmrg`'s energies and converged bond dimension exactly at
+`L=20` (both open and periodic TFIM, every tested `maxdim`) — see
+"Benchmarking" below. Reach for this first if you don't have a specific
+reason to want single-site's lower memory footprint.
+
+**`:dmrg3s` — when memory/speed at large `L` matters more than
+maturity.** Faster and lower-memory than two-site in practice (see
+"Benchmarking" below), consistent with the whole point of the algorithm
+(Hubig, McCulloch, Schollwöck, Wolf 2015): a single-site update never
+forms the larger merged two-site tensor at all, growing the bond only
+through the noise/subspace-expansion term instead. Confirmed to agree
+with two-site's energies at `L=20` (`benchmark/verify_dmrg3s.jl`), not
+just the smaller `L=6` exact-diagonalization check — but it's newer code
+with a shorter validation history, so weigh that against the resource
+savings for your specific problem.
+
 ## Benchmarking
 
 A `PkgBenchmark` suite in `benchmark/` covers `apply!` over a brickwork
@@ -130,6 +162,20 @@ instead. Both are `Trivial`-sites comparisons — see `design_notes.md`
 for caveats and for where a symmetric-tensor comparison could show a
 more fundamental advantage once that support lands.
 
+The same script also compares `dmrg!`'s two-site algorithm against
+`ITensorMPS.dmrg` (`L=20` TFIM, open and periodic): energies match to 6
+decimal places *and* the converged bond dimension matches exactly, across
+every swept `maxdim` and both boundary conditions — QInfoTensor is
+1.4×–2.15× faster with consistently lower memory. Separately (own
+implementation only, no ITensor involved), `nsite=1`
+(single-site-with-subspace-expansion) is faster and lower-memory again
+than two-site at this same `L=20` scale, matching the whole point of
+choosing that algorithm — see `design_notes.md`'s "`dmrg!`" section for
+the full numbers and for `benchmark/verify_dmrg3s.jl`, the dedicated
+(non-`SUITE`) correctness check confirming `nsite=1` and `nsite=2` agree
+numerically at this scale, not just the smaller `L=6`
+exact-diagonalization check in `test/test_dmrg.jl`.
+
 ## Planned algorithms
 
 Ported from an existing dense (non-symmetric) prototype library, roughly in order of expected difficulty on this new backend:
@@ -137,7 +183,7 @@ Ported from an existing dense (non-symmetric) prototype library, roughly in orde
 1. ~~**Zip-up** MPO–MPS contraction — single-pass, sequential.~~ Implemented as `apply!(...,Val(:zipup))`.
 2. ~~**SRC** (Successive Randomized Compression; Camaño, Epperly & Tropp 2025, arXiv:2504.06475).~~ Implemented as `apply!(...,Val(:src))` and benchmarked directly against zip-up (see "Benchmarking" above); not symmetry-preserving, consistent with current `Trivial`-only scope and the paper's own stated limitation (§3.7).
 2b. ~~**Density matrix** (see https://tensornetwork.org/mps/algorithms/denmat_mpo_mps/).~~ Implemented as `apply!(...,Val(:densitymatrix))`, ported from ITensor's own implementation; slower than zip-up on wall-clock time (structural — see "MPO-MPS contraction" above), and currently ~3-9% slower than ITensor's own implementation too, pending a real upstream TensorKit performance fix that was found and prototyped but deliberately not adopted locally (type piracy, not justified by the modest gain — see `design_notes.md`).
-3. **DMRG3S** (Hubig, McCulloch, Schollwöck, Wolf 2015, arXiv:1501.05504) — strictly single-site DMRG with subspace expansion. Not yet started; MPSKit's closest analog (`changebonds` with `OptimalExpand`) is a separate step, not fused into the local update the way DMRG3S needs. Listed here out of the original expected-difficulty order — SRC (above) turned out to be tractable sooner — and now has a real `apply!`/`inner` foundation (both algorithms) to build the local update on top of.
+3. ~~**DMRG3S** (Hubig, McCulloch, Schollwöck, Wolf 2015, arXiv:1501.05504) — strictly single-site DMRG with subspace expansion.~~ Implemented as `dmrg!(...,nsite=1)`, alongside a two-site (`nsite=2`) algorithm — see "DMRG: choosing an algorithm" above. Both confirmed against exact diagonalization; two-site additionally confirmed against `ITensorMPS.dmrg` at `L=20` (energies and converged bond dimension both matching exactly), and single-site confirmed against two-site at that same scale (`benchmark/verify_dmrg3s.jl`).
 
 ## Longer-term direction
 
@@ -155,6 +201,7 @@ Not yet registered.
 
 - [`TensorKit.jl`](https://github.com/QuantumKitHub/TensorKit.jl) — tensor backend, symmetry
 - [`TensorOperations.jl`](https://github.com/Jutho/TensorOperations.jl) — `@tensor`/`@tensoropt` contraction macros
+- [`KrylovKit.jl`](https://github.com/Jutho/KrylovKit.jl) — iterative eigensolver for `dmrg!`'s local update; `TensorMap` implements `VectorInterface.jl`, so `eigsolve` operates directly on `MPSTensor`s/merged two-site tensors with no vec/reshape step needed
 
 `MPSKit.jl` is used only in a development/benchmarking environment (for comparison scripts), never as a package dependency. No `LinearAlgebra` dependency — everything needed (`norm`, `normalize`, `rmul!`, etc.) is already re-exported by `TensorKit.jl`.
 
