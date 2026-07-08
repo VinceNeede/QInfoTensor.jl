@@ -141,14 +141,14 @@ end
 # ------------------------------------------------------------------------
 
 """
-    random_mps([T=Float64,] sites::Vector{<:SiteType}, maxdim::Int)
+    random_mps([T=Float64,] sites::Vector{<:SiteType}; maxdim::Int)
 
 Random `MPS` over `sites` (`Trivial` sites only, see mps.jl's
 `MPS(sites,states)` docstring for why) with maximum bond dimension
 `maxdim`, already in mixed-canonical form with the orthogonality center
 at site `L÷2 + 1`.
 """
-function random_mps(::Type{T}, sites::Vector{<:SiteType{<:Any,Trivial}}, maxdim::Int) where {T<:Number}
+function random_mps(::Type{T}, sites::Vector{<:SiteType{<:Any,Trivial}}; maxdim::Int=1) where {T<:Number}
     L = length(sites)
     tensors = Vector{MPSTensor{T,ComplexSpace,Vector{T}}}(undef, L)
     mid = L ÷ 2
@@ -192,8 +192,8 @@ function random_mps(::Type{T}, sites::Vector{<:SiteType{<:Any,Trivial}}, maxdim:
     return MPS(tensors, mid + 1)
 end
 
-function random_mps(sites::Vector{<:SiteType{<:Any,Trivial}}, maxdim::Int)
-    return random_mps(Float64, sites, maxdim)
+function random_mps(sites::Vector{<:SiteType{<:Any,Trivial}}; maxdim::Int=1)
+    return random_mps(Float64, sites; maxdim)
 end
 
 # ------------------------------------------------------------------------

@@ -23,6 +23,7 @@ abstract type AbstractTensorTrain{T,S<:ElementarySpace,A<:DenseVector{T}} end
 
 Base.length(ψ::AbstractTensorTrain) = length(tensors(ψ))
 Base.getindex(ψ::AbstractTensorTrain, i::Int) = tensors(ψ)[i]
+Base.lastindex(ψ::AbstractTensorTrain) = length(ψ)
 Base.eachindex(ψ::AbstractTensorTrain) = eachindex(tensors(ψ))
 Base.iterate(ψ::AbstractTensorTrain, args...) = iterate(tensors(ψ), args...)
 
