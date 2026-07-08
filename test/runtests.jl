@@ -2,6 +2,7 @@ using Test
 using TensorKit
 using QInfoTensor
 using LinearAlgebra
+using Random
 
 @testset "QInfoTensor.jl" begin
     include("test_sitetype.jl")
