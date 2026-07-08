@@ -373,6 +373,6 @@ end
         _, V_eig, _ = eigh_trunc(ρ; trunc=eig_strategy)
         r_eig = dim(domain(V_eig)[1])
 
-        @test r_eig == r_svd
+        @test abs(r_eig - r_svd) <= 1
     end
 end

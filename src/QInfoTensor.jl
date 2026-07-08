@@ -2,6 +2,7 @@ module QInfoTensor
 
 using TensorKit
 using TensorOperations
+using KrylovKit: eigsolve
 
 # ------------------------------------------------------------------------
 # Core types, built up incrementally and agreed step-by-step (see chat /
@@ -22,6 +23,7 @@ include("mps.jl")
 include("mpo.jl")
 include("orthogonalize.jl")
 include("opsum.jl")
+include("dmrg.jl")
  
 export SiteType, OpName, StateName, @alias_sitetype, sitetypes
 export op, state, optensor, statetensor
@@ -34,4 +36,5 @@ export orthogonalize, orthogonalize!, orthogonalize!!, compress, compress!, comp
 export inner, norm, normalize, normalize!, normalize!!
 export OpTerm, OpSum, add!
 export expect, expect!, apply, apply!
+export ProjMPO, dmrg!
 end # module QInfoTensor
