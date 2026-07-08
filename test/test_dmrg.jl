@@ -12,6 +12,10 @@
 # depend on the draw, especially the nsite=1 noise tests starting from
 # bond dimension 2 within only 10 sweeps — so this file fixes the seed,
 # unlike its siblings.
+using LinearAlgebra
+using Random
+
+Random.seed!(1234)
 
 # ------------------------------------------------------------------------
 # Test-only helpers — NOT part of the package.
@@ -133,4 +137,51 @@ end
     E_dmrg3s = sd_dmrg3s[end].energies[end]
 
     @test E_twosite ≈ E_dmrg3s atol=1e-6
+end
+
+@testset "heff is Hermitian when the right-moving environment is genuinely exercised" begin
+    # Closes a real gap, not just adding coverage: the right-moving
+    # environment (_seed_env/_extend_env, Val(:right)) was previously only
+    # INDIRECTLY confirmed via correct end-to-end dmrg3s energies — never
+    # given a direct check the way _densitymatrix_envs's own E was
+    # (‖E-E'‖/‖E‖). A literal E≈E' doesn't even type-check here, though:
+    # EnvTensor is (1,2)-shaped (codomain=(bra,), domain=(mpo,ket)), not
+    # square like _densitymatrix_envs's (2,2)-shaped E, so E' has a
+    # DIFFERENT shape than E, not just swapped bra/ket. The actual
+    # invariant that matters — and the one eigsolve's `ishermitian=true`
+    # is implicitly relying on — is the bilinear-form condition
+    # ⟨x|heff(y)⟩ = conj(⟨y|heff(x)⟩) for arbitrary x,y in the same space
+    # as the local tensor, checked directly via `inner`, no assumption
+    # about EnvTensor's own shape needed.
+    L = 5
+    sites = sitetypes(:SpinHalf, L)
+    H_os = OpSum()
+    for i in 1:(L-1)
+        H_os += (-1.0, :Sz, i, :Sz, i + 1)
+    end
+    for i in 1:L
+        H_os += (-0.5, :Sx, i)
+    end
+    H = MPO(H_os, sites)
+    ψ = random_mps(sites, 4)
+    orthogonalize!(ψ, 1)
+
+    P = QInfoTensor.ProjMPO(H, 1)
+    pos = 2  # NOT a boundary site: forces position! to chain multiple real
+    # _extend_env(...,Val(:right)) calls (seed -> real -> real) to build
+    # P.env[P.rpos], not just a single seed-based extend — the same "many
+    # invocations, not just one" exercise verify_dmrg3s.jl's energy
+    # agreement already implied indirectly, now checked directly.
+    QInfoTensor.position!(P, ψ, pos)
+
+    Vc, Vd = codomain(ψ[pos]), domain(ψ[pos])
+    x = randn(ComplexF64, Vc ← Vd)
+    y = randn(ComplexF64, Vc ← Vd)
+
+    Hx = QInfoTensor.heff(P, pos, ψ, x)
+    Hy = QInfoTensor.heff(P, pos, ψ, y)
+
+    lhs = inner(x, Hy)
+    rhs = conj(inner(y, Hx))
+    @test lhs ≈ rhs atol=1e-10
 end
