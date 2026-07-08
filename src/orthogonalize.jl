@@ -67,9 +67,9 @@ end
 # what zip-up needs — flagged in mpo.jl, not resolved here.
 
 function _leftstep!(ψ::MPO, i::Int; factorize)
-    t = repartition(ψ[i], 3, 1)                     # (left,site_out,site_in) | (right)
+    t = permute(ψ[i], ((1, 2, 3), (4,)))                     # (left,site_out,site_in) | (right)
     V, C = factorize(t)
-    ψ.tensors[i] = repartition(V, 2, 2)              # (left,site_out) | (site_in,right) — native shape
+    ψ.tensors[i] = permute(V, ((1, 2), (3, 4)))              # (left,site_out) | (site_in,right) — native shape
     @tensor ψ.tensors[i+1][a, b; c, d] := C[a, e] * ψ.tensors[i+1][e, b, c, d]
     return ψ
 end
