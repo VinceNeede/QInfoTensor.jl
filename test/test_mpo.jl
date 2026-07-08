@@ -376,3 +376,158 @@ end
         @test abs(r_eig - r_svd) <= 1
     end
 end
+
+# ------------------------------------------------------------------------
+# orthogonalize!/compress! for MPO — closes a real gap, not just adding
+# coverage for its own sake. Per design_notes: MPO's `_leftstep!` had
+# NEVER actually executed (every prior exercise of MPO orthogonalization
+# — via apply!'s own `orthogonalize!(H,1)` calls — only ever sweeps
+# TOWARD site 1 from a fresh, llim=0 MPO, which needs only `_rightstep!`).
+# `orthogonalize!!`/`compress!`/`compress!!` on MPO were untested too.
+#
+# Isometry-check helpers generalize test_mps.jl's `_is_left_isometric`/
+# `_is_right_isometric` from MPSTensor's 3-leg (left,phys,right) shape to
+# MPOTensor's 4-leg (left,site_out,site_in,right) one — same idea, an
+# extra physical leg along for the ride, exactly how DMRG3S's own
+# `_dmrg3s_perturbation`/`heff` already treat MPOTensor's physical legs
+# relative to MPSTensor's single one.
+# ------------------------------------------------------------------------
+
+function _is_left_isometric_mpo(t)
+    @tensor tt[a; b] := conj(t[l, so, si, a]) * t[l, so, si, b]
+    return tt ≈ id(domain(t)[2])
+end
+function _is_right_isometric_mpo(t)
+    @tensor tt[a; b] := t[a, so, si, c] * conj(t[b, so, si, c])
+    return tt ≈ id(codomain(t)[1])
+end
+
+@testset "orthogonalize!(H) moves the center and gives isometric flanks (MPO)" begin
+    L = 6
+    J, h = 1.0, 0.5
+    sites = sitetypes(:SpinHalf, L)
+    H_os = OpSum()
+    for i in 1:(L-1)
+        H_os += (-J, :Sz, i, :Sz, i + 1)
+    end
+    for i in 1:L
+        H_os += (-h, :Sx, i)
+    end
+
+    # target=1 only ever needs _rightstep! (sweeping toward site 1 from a
+    # fresh llim=0 MPO never touches llim at all — the only case apply!'s
+    # own orthogonalize!(H,1) calls have ever exercised). target=L is the
+    # mirror (_leftstep! only). A MIDDLE target from a fresh MPO needs
+    # BOTH in the same call — that's what actually forces _leftstep! to
+    # run for the first time.
+    for target in (1, 3, L ÷ 2 + 1, L)
+        H = MPO(H_os, sites)  # fresh (llim=0, rlim=L+1) every iteration
+        orthogonalize!(H, target)
+
+        @test isortho(H)
+        @test orthocenter(H) == target
+
+        for i in 1:(target-1)
+            @test _is_left_isometric_mpo(H[i])
+        end
+        for i in (target+1):L
+            @test _is_right_isometric_mpo(H[i])
+        end
+
+        # state unchanged: sandwiched between the same pair of random MPS,
+        # orthogonalizing H shouldn't change ⟨ψ|H|φ⟩ (mirrors test_mps.jl's
+        # own "orthogonalize! preserves the state" check, but the natural
+        # invariant for an operator is a matrix element, not a norm/overlap)
+        ψ = random_mps(sites, 4)
+        φ = random_mps(sites, 4)
+        H0 = MPO(H_os, sites)
+        @test inner(ψ, H, φ) ≈ inner(ψ, H0, φ) atol=1e-8
+    end
+end
+
+@testset "orthogonalize!! matches orthogonalize! (MPO, destructive vs non-destructive)" begin
+    L = 6
+    sites = sitetypes(:SpinHalf, L)
+    H_os = OpSum()
+    for i in 1:(L-1)
+        H_os += (-1.0, :Sz, i, :Sz, i + 1)
+    end
+    for i in 1:L
+        H_os += (-0.5, :Sx, i)
+    end
+
+    target = 3  # middle target: exercises _leftstep! for the !! path too
+    H1 = orthogonalize!(MPO(H_os, sites), target)
+    H2 = orthogonalize!!(MPO(H_os, sites), target)
+
+    @test isortho(H2)
+    @test orthocenter(H2) == target
+
+    ψ = random_mps(sites, 4)
+    φ = random_mps(sites, 4)
+    @test inner(ψ, H1, φ) ≈ inner(ψ, H2, φ) atol=1e-8
+end
+
+@testset "compress!: MPO lossless (no truncation) preserves the operator" begin
+    L = 6
+    sites = sitetypes(:SpinHalf, L)
+    H_os = OpSum()
+    for i in 1:(L-1)
+        H_os += (-1.0, :Sz, i, :Sz, i + 1)
+    end
+    for i in 1:L
+        H_os += (-0.5, :Sx, i)
+    end
+
+    H0 = MPO(H_os, sites)
+    H = MPO(H_os, sites)
+    compress!(H; maxdim=100)  # generous — should truncate nothing real
+
+    @test isortho(H)
+
+    ψ = random_mps(sites, 4)
+    φ = random_mps(sites, 4)
+    @test inner(ψ, H, φ) ≈ inner(ψ, H0, φ) atol=1e-8
+end
+
+@testset "compress!: MPO maxdim actually caps bond dimension" begin
+    L = 6
+    sites = sitetypes(:SpinHalf, L)
+    H_os = OpSum()
+    for i in 1:(L-1)
+        H_os += (-1.0, :Sz, i, :Sz, i + 1)
+    end
+    for i in 1:L
+        H_os += (-0.5, :Sx, i)
+    end
+
+    H = MPO(H_os, sites)
+    compress!(H; maxdim=2)
+
+    for i in 1:(L-1)
+        @test dim(domain(H[i])[1]) <= 2
+    end
+    @test isortho(H)
+end
+
+@testset "compress!!: MPO destructive path matches compress!" begin
+    L = 6
+    sites = sitetypes(:SpinHalf, L)
+    H_os = OpSum()
+    for i in 1:(L-1)
+        H_os += (-1.0, :Sz, i, :Sz, i + 1)
+    end
+    for i in 1:L
+        H_os += (-0.5, :Sx, i)
+    end
+
+    H1 = MPO(H_os, sites)
+    compress!(H1; maxdim=3)
+    H2 = MPO(H_os, sites)
+    compress!!(H2; maxdim=3)
+
+    @test isortho(H2)
+    ψ = random_mps(sites, 4)
+    φ = random_mps(sites, 4)
+    @test inner(ψ, H1, φ) ≈ inner(ψ, H2, φ) atol=1e-8
+end
