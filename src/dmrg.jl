@@ -3,25 +3,25 @@
 const _DEFAULT_EIGSOLVE_KWARGS = (krylovdim=6, maxiter=5)
 
 """
-    ProjMPO{T,N}
+    ProjMPO{ET,N}
  
 Windowed effective-Hamiltonian cache for DMRG. `N ∈ {1,2}` is the number of
 active sites per local update. `env[i]` holds the left environment through
 site `i` while `i ≤ lpos`, or the right environment through site `i` while
 `i ≥ rpos`. Construct with `ProjMPO(H, nsite)`, advance with [`position!`](@ref).
 """
-mutable struct ProjMPO{T,N}
+mutable struct ProjMPO{ET,N}
     H::MPO
-    env::Vector{T}
+    env::Vector{ET}
     lpos::Int
     rpos::Int
-    function ProjMPO(H::MPO, env::Vector{T}, nsite::Int, lpos::Int, rpos::Int) where {T}
+    function ProjMPO(H::MPO, env::Vector{ET}, nsite::Int, lpos::Int, rpos::Int) where {ET}
         nsite ∉ (1, 2) && error("nsite must be 1 or 2")
-        return new{T,nsite}(H, env, lpos, rpos)
+        return new{ET,nsite}(H, env, lpos, rpos)
     end
 end
  
-nsite(::ProjMPO{T,N}) where {T,N} = N
+nsite(::ProjMPO{ET,N}) where {ET,N} = N
 Base.length(P::ProjMPO) = length(P.H)
  
 # --- Environment tensor type -------------------------------------------
@@ -41,11 +41,11 @@ function ProjMPO(H::MPO{T, S, A}, nsite::Int=2) where {T, S, A}
     return ProjMPO(H, Vector{ET}(undef, L), nsite, 0, L + 1)
 end
  
-function _rangeP(P::ProjMPO{T,1}, forward::Bool) where {T}
+function _rangeP(P::ProjMPO{ET,1}, forward::Bool) where {ET}
     L = length(P)
     return forward ? (1:(L-1)) : (L:-1:2)
 end
-function _rangeP(P::ProjMPO{T,2}, forward::Bool) where {T}
+function _rangeP(P::ProjMPO{ET,2}, forward::Bool) where {ET}
     L = length(P)
     return forward ? (1:(L-1)) : ((L-1):-1:1)
 end
@@ -147,9 +147,9 @@ end
  
 # --- Local tensor extraction ---------------------------------------------
  
-_local_tensor(::ProjMPO{T,1}, ψ::MPS, pos::Int) where {T} = ψ[pos]
+_local_tensor(::ProjMPO{ET,1}, ψ::MPS, pos::Int) where {ET} = ψ[pos]
  
-function _local_tensor(::ProjMPO{T,2}, ψ::MPS, pos::Int) where {T}
+function _local_tensor(::ProjMPO{ET,2}, ψ::MPS, pos::Int) where {ET}
     # Merge two adjacent MPSTensors into one rank-4 object:
     #   codomain = (left, site1, site2), domain = (right,)
     # generalizing MPSTensor's own "everything but right goes in codomain"
@@ -195,7 +195,7 @@ the first draft's hand-written, buggy boundary contractions (which
 dropped/misassigned `Hi`'s own left/right leg) with a single uniform
 formula, same principle as the `position!` fix above.
 """
-function heff(P::ProjMPO{T,1}, pos::Int, ψ::MPS, phi::MPSTensor) where {T}
+function heff(P::ProjMPO{ET,1}, pos::Int, ψ::MPS, phi::MPSTensor) where {ET}
     Hi = P.H[pos]
     EL, ER = _env(P, ψ, pos, Val(:left)), _env(P, ψ, pos, Val(:right))
     @tensoropt (l, r, li, ri) begin
@@ -204,7 +204,7 @@ function heff(P::ProjMPO{T,1}, pos::Int, ψ::MPS, phi::MPSTensor) where {T}
     return Hphi
 end
  
-function heff(P::ProjMPO{T,2}, pos::Int, ψ::MPS, phi2::TwoSiteTensor) where {T}
+function heff(P::ProjMPO{ET,2}, pos::Int, ψ::MPS, phi2::TwoSiteTensor) where {ET}
     H1, H2 = P.H[pos], P.H[pos+1]
     EL, ER = _env(P, ψ, pos, Val(:left)), _env(P, ψ, pos+1, Val(:right))
     @tensoropt (l, r, li, ri) begin
@@ -221,8 +221,8 @@ end
 # nsite=2: plain tsvd, reusing the existing `_svd_truncation_strategy` —
 # lowest-risk part of this whole file, structurally identical to a single
 # orthogonalize!/compress! step.
-function _update_local_tensors!(::ProjMPO{T,2}, ψ::MPS, phi2::TwoSiteTensor, pos::Int, forward::Bool;
-                                 maxdim=nothing, cutoff=nothing) where {T}
+function _update_local_tensors!(::ProjMPO{ET,2}, ψ::MPS, phi2::TwoSiteTensor, pos::Int, forward::Bool;
+                                 maxdim=nothing, cutoff=nothing) where {ET}
     strategy = _svd_truncation_strategy(maxdim, cutoff)  # existing helper, per compress.jl
     phi2p = permute(phi2, ((1, 2), (3, 4)))
     U, S, Vh, truncerr = svd_trunc(phi2p; trunc=strategy)
@@ -364,8 +364,8 @@ _dmrg3s_residual(::Val{:left}, S, Vh, inj1) = S * Vh * inj1
 _dmrg3s_residual(::Val{:right}, U, S, ::Nothing) = U * S
 _dmrg3s_residual(::Val{:right}, U, S, inj1) = inj1' * U * S
 
-function _update_local_tensors!(P::ProjMPO{T,1}, ψ::MPS, ϕ::MPSTensor, pos::Int, forward::Bool;
-                                 maxdim=nothing, cutoff=nothing, noise=nothing) where {T}
+function _update_local_tensors!(P::ProjMPO{ET,1}, ψ::MPS, ϕ::MPSTensor, pos::Int, forward::Bool;
+                                 maxdim=nothing, cutoff=nothing, noise=nothing) where {ET}
     strategy = _svd_truncation_strategy(maxdim, cutoff)
     dir = forward ? Val(:left) : Val(:right)
     inj1 = nothing
@@ -500,19 +500,19 @@ end
 | `start_forward`   | Sweep direction for sweep 1 (default `true`, left-to-right). |
 | `nsite`           | (MPO overload only) 1 (`:dmrg3s`) or 2 (`:twosite`). |
 """
-function dmrg!(ψ::MPS, P::ProjMPO{T, 1}, nsweeps::Int;
+function dmrg!(ψ::MPS, P::ProjMPO{ET, 1}, nsweeps::Int;
                eigsolve_tol=nothing, eigsolve_kwargs=(;),
                start_forward::Bool=true,
-               maxdim=nothing, cutoff=nothing, noise=_default_noise(nsweeps)) where {T}
+               maxdim=nothing, cutoff=nothing, noise=_default_noise(nsweeps)) where {ET}
     return _dmrg!(ψ, P, nsweeps;
                eigsolve_tol=eigsolve_tol, eigsolve_kwargs=eigsolve_kwargs,
                start_forward=start_forward,
                maxdim=maxdim, cutoff=cutoff, noise=noise)
 end
-function dmrg!(ψ::MPS, P::ProjMPO{T, 2}, nsweeps::Int;
+function dmrg!(ψ::MPS, P::ProjMPO{ET, 2}, nsweeps::Int;
                eigsolve_tol=nothing, eigsolve_kwargs=(;),
                start_forward::Bool=true,
-               maxdim=nothing, cutoff=nothing) where {T}
+               maxdim=nothing, cutoff=nothing) where {ET}
     return _dmrg!(ψ, P, nsweeps;
                eigsolve_tol=eigsolve_tol, eigsolve_kwargs=eigsolve_kwargs,
                start_forward=start_forward,
