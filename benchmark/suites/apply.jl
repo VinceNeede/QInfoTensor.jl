@@ -68,13 +68,16 @@ for problem in RANDOM_APPLY_PROBLEMS
     H, ψ0 = build_random_apply_inputs(problem)
 
     for alg in APPLY_ALGS
+        # CRITICAL: Skip densitymatrix for large random problems to avoid fundamental OOM.
+        # This regime is kept to measure the speed scaling between :zipup and :src.
+        alg == :densitymatrix && continue
+
         SUITE["apply"]["random"][problem.name]["alg=$alg"] = BenchmarkGroup()
 
         for χ in problem.maxdim_values
-            SUITE["apply"]["random"][problem.name]["alg=$alg"]["maxdim=$χ"] =
-                @benchmarkable(
-                    run_random_apply($H, $ψ0; alg=$alg, maxdim=$χ)
-                )
+            @benchmarkable(
+                run_random_apply($H, $ψ0; alg=$alg, maxdim=$χ)
+            )
         end
     end
 end
