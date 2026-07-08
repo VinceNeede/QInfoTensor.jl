@@ -196,7 +196,7 @@ function random_mps(sites::Vector{<:SiteType{<:Any,Trivial}}; maxdim::Int=1)
     return random_mps(Float64, sites; maxdim)
 end
 # backward compatibility
-random_mps(::Type{T}, sites::Vector{<:SiteType{<:Any,Trivial}}, maxdim::Int) = random_mps(T, sites; maxdim)
+random_mps(::Type{T}, sites::Vector{<:SiteType{<:Any,Trivial}}, maxdim::Int) where {T<:Number} = random_mps(T, sites; maxdim)
 random_mps(sites::Vector{<:SiteType{<:Any,Trivial}}, maxdim::Int) = random_mps(sites; maxdim)
 
 
