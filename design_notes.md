@@ -152,14 +152,20 @@ CPU-resident always.
 `(left,site_out)`, domain `(site_in,right)` — **not** `(right,site_in)` as
 originally written. Flattened native order: `(left,site_out,site_in,right)`
 — bond legs on the outside, both physical legs adjacent in the middle.
-Changed specifically because it makes orthogonalization's per-site steps
-plain contiguous `repartition` calls in both directions (the original
-`(right,site_in)` order needed a genuine `permute` for one direction,
-since `site_in` and `right` weren't adjacent). Unplanned bonus: this also
-turned out to be exactly the natural flattening order for `OpSum`'s FSM
-dense-array construction (`(S_prev,site_out,site_in,S_curr)` maps
-directly onto it), confirming the change was right for reasons beyond the
-original motivation.
+Originally motivated by a claim that turned out to be **wrong**: that
+this order makes orthogonalization's per-site steps plain contiguous
+`repartition` calls in both directions, no `permute` needed. It doesn't
+— `repartition(t,n1,n2)` moves legs off the *end* of whichever side is
+shrinking/growing, not "flatten and split at position `n1`" as assumed,
+and this order didn't sidestep that; it just happened to make
+`_rightstep!`'s two wrong-end moves cancel by coincidence while
+`_leftstep!`'s didn't (confirmed via direct REPL inspection, see
+"Open questions" — this was a real, live bug, not a hypothetical). Both
+steps now use explicit `permute` regardless, so the "no permute needed"
+half of the original rationale is retired. The order itself is still
+worth keeping, though, for the reason found afterward: `OpSum`'s FSM
+dense-array construction (`(S_prev,site_out,site_in,S_curr)`) maps
+directly onto it — that motivation holds independent of the retired one.
 
 `site_out`/`site_in` are **both plain `phys`-typed**, not one dualized —
 this was deliberately checked (see "Duality rules learned the hard way"
@@ -679,9 +685,11 @@ without this asymmetry.
 
 This was also the first real exercise of MPO orthogonalization at all.
 `orthogonalize!(H,1)` from a fresh (`llim=0`) MPO only triggers the
-**right**-sweep, so this confirms `_rightstep!` (and the `a,b;c,d`
-semicolon syntax it uses — see open question 8) works, but `_leftstep!`
-for MPO has still never actually executed. `compress!`/`orthogonalize!!`/
+**right**-sweep, so this confirmed `_rightstep!` (and the `a,b;c,d`
+semicolon syntax it uses) works, but `_leftstep!` for MPO had still never
+actually executed at the time this section was first written — see "Open
+questions", item 8, for the real bug that turned up once a dedicated test
+finally forced it to run, and its resolution. `compress!`/`orthogonalize!!`/
 `compress!!` on `MPO` remain untested too.
 
 Benchmarks run and pass. Observed cost scaling (both `maxdim`-at-fixed-`L`
@@ -1097,17 +1105,49 @@ reproducing historically, though both are now independently confirmed.
 6. **Charged operators / charged states / symmetric FSM construction** —
    the single biggest open item blocking any non-`Trivial` symmetry work;
    see "Current scope" above for the unified statement of the problem.
-7. **MPO's `llim`/`rlim` semantics under zip-up** — still open (see
-   "Core types" above); `apply!` currently works around this by
-   `set_ortho_lims!`-ing directly rather than relying on the shared
-   generic bookkeeping meaning anything mid-sweep.
-8. **`a, b; c, d` (multiple-before-multiple-after) semicolon syntax in
-   MPO orthogonalization steps** — the syntax pattern itself is now
-   confirmed safe (exercised by `_rightstep!` via the benchmark suite's
-   correctness check), but `_leftstep!` for `MPO` specifically has still
-   never actually executed — `orthogonalize!(H,1)` from a fresh MPO only
-   triggers the right-sweep. `compress!`/`orthogonalize!!`/`compress!!`
-   on `MPO` are also untested.
+7. **MPO's `llim`/`rlim` semantics under zip-up specifically** — narrowed,
+   not fully resolved. Item 8 below confirms the *general* concept of MPO
+   orthogonality is coherent and correctly implemented (`orthogonalize!`/
+   `compress!` on MPO now give genuinely isometric flanks, verified
+   directly). What's still open is narrower: whether zip-up's own manual
+   `set_ortho_lims!` calls (which bypass `_orthogonalize!`'s actual step
+   functions entirely, just declaring a center rather than sweeping to
+   one) leave `llim`/`rlim` in a state that actually reflects genuine
+   orthogonality — untouched by this round of testing, since it only
+   exercised `orthogonalize!`/`compress!` directly, not `apply!`'s
+   internal bookkeeping.
+8. **RESOLVED — real bug, not just a coverage gap.** MPO's `_leftstep!`
+   had never actually executed before a dedicated test forced it to (a
+   fresh MPO orthogonalized toward a *middle* target — edge targets like
+   `orthogonalize!(H,1)` only ever need `_rightstep!`). It failed
+   immediately with a `SpaceMismatch`. Root cause, confirmed via direct
+   REPL inspection rather than assumed: `repartition(t,n1,n2)` does
+   **not** "flatten the tensor's legs and split at position `n1`," which
+   is what both step functions' comments assumed. It actually moves legs
+   off the *end* of whichever side is shrinking and appends them to the
+   *end* of whichever side is growing. For `_leftstep!`, growing
+   codomain from 2→3 legs meant it grabbed `right` (domain's last leg)
+   instead of `site_in` (domain's first, boundary-adjacent leg) — wrong
+   leg entirely. `_rightstep!` reads structurally identical but happened
+   to give the *correct* final answer anyway: its own two "wrong-end"
+   repartitions are chained on the same tensor and cancel each other out,
+   and its absorption line only ever touches `C`'s single-leg codomain,
+   which is never ambiguous regardless of domain-leg ordering — a
+   coincidence of that step's specific structure, not something the
+   original design reasoning anticipated or should be relied on again.
+   Fixed by replacing all four `repartition` calls with explicit
+   `permute` (full position-tuple lists, no "which end" ambiguity
+   possible) in both steps — `_rightstep!`'s calls weren't actually
+   broken, but were switched too so nothing in this file still depends on
+   `repartition`'s undocumented direction convention. The `@tensor`
+   absorption lines themselves needed no changes; the corruption was
+   entirely upstream, in how the intermediate tensors were built. The
+   "MPOTensor leg order" rationale in `orthogonalize.jl`'s own header
+   comment ("changed specifically because it makes both steps plain
+   contiguous repartition calls, no permute needed") was the wrong
+   reasoning that led here — corrected in place rather than left as a
+   misleading historical artifact. `compress!`/`orthogonalize!!`/
+   `compress!!` on MPO, also previously untested, all pass now too.
 9. **SRC symmetry-preservation** — not attempted; `apply!(...,Val(:src))`
    throws for non-`Trivial` sectors rather than silently producing a
    symmetry-violating result. Same underlying blocker as item 6 (charged
@@ -1137,14 +1177,20 @@ reproducing historically, though both are now independently confirmed.
    since fixed per-operation bookkeeping overhead should be a bigger
    fraction of a smaller, less FLOP-dominated total. Cheap to check,
    just not yet run.
-13. **Right-moving environment (`_seed_env`/`_extend_env`,
-   `Val(:right)`) has no *direct* Hermiticity check** — only indirect
-   confirmation via `:dmrg3s`'s correct end-to-end energies at `L=6` and
-   `L=20` (see "`dmrg!`" above). A standalone `‖E-E'‖/‖E‖` check on a toy
-   right-moving environment, the same test already used to validate
-   `_densitymatrix_envs`'s `E`, would close this out properly, but isn't
-   currently judged worth the effort given the numerical agreement
-   already obtained.
+13. **RESOLVED — right-moving environment now has a direct check, not
+   just indirect confirmation.** `test_dmrg.jl` now includes
+   `"heff is Hermitian when the right-moving environment is genuinely
+   exercised"`, deliberately positioned (`pos` not a boundary site) so
+   `position!` chains multiple real `_extend_env(...,Val(:right))` calls
+   (seed → real → real), not just one seed-based step. A literal `E≈E'`
+   check (the pattern used for `_densitymatrix_envs`'s own `E`) doesn't
+   type-check here — `EnvTensor` is `(1,2)`-shaped, not square, so `E'`
+   comes out `(2,1)`-shaped, a genuinely different shape, not just a
+   bra/ket swap. The actual invariant that matters (and the one
+   `eigsolve(...;ishermitian=true)` implicitly relies on) is the
+   bilinear-form condition `⟨x|heff(y)⟩ = conj(⟨y|heff(x)⟩)` for
+   arbitrary `x,y` in the local tensor's own space, checked directly via
+   `inner` — passes.
 14. **`:dmrg3s`'s default noise schedule (`_default_noise`) has a single
    hardcoded shape** (`start=1e-2`, one decade per sweep, `zero_tail=2`)
    — reasonable given `verify_dmrg3s.jl`'s results, but not tuned or
@@ -1154,10 +1200,16 @@ reproducing historically, though both are now independently confirmed.
    does here.
 15. **MPO's own `llim`/`rlim` semantics under `:dmrg3s`/`:twosite`** —
    `ProjMPO`/`heff` only ever read `H`'s tensors positionally (`P.H[pos]`
-   etc.), never its `llim`/`rlim` bookkeeping, so the existing open
-   question about what MPO orthogonality limits mean under `zip-up`
-   (item 7 above) remains exactly as open as before — `dmrg!` neither
-   resolves nor depends on it.
+   etc.), never its `llim`/`rlim` bookkeeping, so `dmrg!` neither
+   resolves nor depends on the narrowed question in item 7 (zip-up's own
+   manual bookkeeping specifically) — unaffected by that item's update.
+16. **`ProjMPO`'s type parameter renamed `T`→`ET`** throughout `dmrg.jl`
+   — was colliding with the "`T` = scalar type" convention every other
+   container (`MPSTensor`/`MPOTensor`/`EnvTensor`/`TwoSiteTensor`) uses;
+   `ProjMPO`'s `T` was always a tensor type (`env::Vector{T}`), not a
+   scalar type. Pure consolidation, no behavior change — worth having
+   done before a `Sym`/`Sector` parameter gets threaded through
+   everything for symmetric-tensor support.
 
 ## Roadmap (actual order, for reference)
 
